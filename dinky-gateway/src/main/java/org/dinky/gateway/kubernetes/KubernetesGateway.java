@@ -41,11 +41,9 @@ import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.kubernetes.KubernetesClusterClientFactory;
 import org.apache.flink.kubernetes.KubernetesClusterDescriptor;
 import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
-import org.apache.flink.kubernetes.kubeclient.Fabric8FlinkKubeClient;
 import org.apache.flink.kubernetes.kubeclient.FlinkKubeClient;
 import org.apache.flink.python.PythonOptions;
 
-import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.Map;
 import java.util.UUID;
@@ -55,7 +53,6 @@ import java.util.regex.Pattern;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.lang.Assert;
 import cn.hutool.core.text.StrFormatter;
-import cn.hutool.core.util.ReflectUtil;
 import cn.hutool.core.util.StrUtil;
 import io.fabric8.kubernetes.api.model.Pod;
 import lombok.Data;
@@ -225,15 +222,11 @@ public abstract class KubernetesGateway extends AbstractGateway {
             addConfigParas(KubernetesConfigOptions.CLUSTER_ID, UUID.randomUUID().toString());
             initConfig();
             FlinkKubeClient client = k8sClientHelper.getClient();
-            if (client instanceof Fabric8FlinkKubeClient) {
-                Object internalClient = ReflectUtil.getFieldValue(client, "internalClient");
-                Method method = ReflectUtil.getMethod(internalClient.getClass(), "getVersion");
-                Object versionInfo = method.invoke(internalClient);
-                logger.info(
-                        "k8s cluster link successful ; k8s version: {} ; platform: {}",
-                        ReflectUtil.getFieldValue(versionInfo, "gitVersion"),
-                        ReflectUtil.getFieldValue(versionInfo, "platform"));
-            }
+            int visiblePodCount = verifyKubernetesAccess(client);
+            logger.info(
+                    "k8s cluster link successful ; namespace: {} ; visible pod count: {}",
+                    configuration.get(KubernetesConfigOptions.NAMESPACE),
+                    visiblePodCount);
             return TestResult.success();
         } catch (Exception e) {
             logger.error(Status.GATEWAY_KUBERNETES_TEST_FAILED.getMessage(), e);
@@ -242,6 +235,15 @@ public abstract class KubernetesGateway extends AbstractGateway {
         } finally {
             close();
         }
+    }
+
+    /**
+     * Kubernetes 1.33 及以上版本的 /version 响应新增了 emulationMajor 等字段，Flink 1.20 内置的旧版
+     * Fabric8 客户端无法反序列化这些字段。连接测试改为读取目标命名空间的 Pod 列表，既规避版本接口的
+     * 兼容问题，也能真实校验 kubeconfig、网络连通性、命名空间和基础读取权限。
+     */
+    protected int verifyKubernetesAccess(FlinkKubeClient client) {
+        return client.getPodsWithLabels(Collections.emptyMap()).size();
     }
 
     @Override
