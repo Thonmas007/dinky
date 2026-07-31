@@ -14,4 +14,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-./mvnw clean package -Dmaven.test.skip=true -P aliyun,prod,web,flink-1.14
+./mvnw clean package -Dmaven.test.skip=true -Dspotless.check.skip=true -P aliyun,prod,web,flink-1.20,flink-single-version

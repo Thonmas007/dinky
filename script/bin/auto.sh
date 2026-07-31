@@ -24,6 +24,10 @@ fi
 
 source /etc/profile
 
+# 固定使用已验证的 JDK 11，与 Flink 1.20 推荐运行环境保持一致，避免宿主机默认 Java 版本影响启停。
+export JAVA_HOME=/Users/liuningbo/applications/java/jdk11/Contents/Home
+export PATH="${JAVA_HOME}/bin:${PATH}"
+
 RETURN_HOME_PATH=""
 function get_home_path() {
     SOURCE="${BASH_SOURCE[0]}"
@@ -179,8 +183,12 @@ PARAMS_OPT="-Ddinky.logs.path=${DINKY_LOG_PATH} -Ddinky.root.path=${APP_HOME} -D
 JAR_PARAMS_OPT="--logging.config=${LOG_CONFIG}"
 # JMX path
 JMX="-javaagent:$APP_HOME/lib/jmx_prometheus_javaagent-0.20.0.jar=10087:$APP_HOME/config/jmx/jmx_exporter_config.yaml"
-#JVM OPTS
-JVM_OPTS="-Xms512M -Xmx2048M -XX:PermSize=512M -XX:MaxPermSize=1024M"
+# JVM 参数需兼容 JDK 8 与新版本；PermGen 在 JDK 8 之后已移除，继续传入会导致进程无法启动。
+if [ ${JAVA_VERSION} = "1.8" ];then
+  JVM_OPTS="-Xms512M -Xmx2048M -XX:PermSize=512M -XX:MaxPermSize=1024M"
+else
+  JVM_OPTS="-Xms512M -Xmx2048M"
+fi
 
 # Check whether the pid path exists
 PID_PATH="${APP_HOME}/run"
