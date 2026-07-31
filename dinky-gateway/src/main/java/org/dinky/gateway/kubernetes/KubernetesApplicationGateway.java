@@ -40,12 +40,14 @@ import org.dinky.gateway.result.KubernetesResult;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.collections.MapUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.client.deployment.ClusterDeploymentException;
 import org.apache.flink.client.deployment.ClusterSpecification;
 import org.apache.flink.client.deployment.application.ApplicationConfiguration;
 import org.apache.flink.client.program.ClusterClient;
 import org.apache.flink.client.program.ClusterClientProvider;
+import org.apache.flink.kubernetes.KubernetesClusterClientFactory;
 import org.apache.flink.kubernetes.KubernetesClusterDescriptor;
 import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
 import org.apache.flink.kubernetes.kubeclient.FlinkKubeClient;
@@ -88,6 +90,46 @@ public class KubernetesApplicationGateway extends KubernetesGateway {
     @Override
     public GatewayType getType() {
         return GatewayType.KUBERNETES_APPLICATION;
+    }
+
+    /** 从自动注册集群标识中移除 Job ID，恢复 Kubernetes Deployment 的真实名称。 */
+    public static String resolveClusterId(String registeredClusterId, String jobId) {
+        if (Asserts.isAllNotNullString(registeredClusterId, jobId) && registeredClusterId.endsWith(jobId)) {
+            return registeredClusterId.substring(0, registeredClusterId.length() - jobId.length());
+        }
+        return registeredClusterId;
+    }
+
+    /** 通过 Kubernetes 集群描述器重新连接 Application 集群，供 Dinky 服务端主动补查作业状态。 */
+    @Override
+    public org.dinky.data.enums.JobStatus getJobStatusById(String id) {
+        initConfig();
+        addConfigParas(
+                KubernetesConfigOptions.CLUSTER_ID, config.getClusterConfig().getAppId());
+        KubernetesClusterClientFactory clusterClientFactory = new KubernetesClusterClientFactory();
+        String clusterId = clusterClientFactory.getClusterId(configuration);
+        if (Asserts.isNullString(clusterId)) {
+            throw new GatewayException("No Kubernetes cluster id was specified for active polling.");
+        }
+
+        try (KubernetesClusterDescriptor clusterDescriptor =
+                        clusterClientFactory.createClusterDescriptor(configuration);
+                ClusterClient<String> clusterClient =
+                        clusterDescriptor.retrieve(clusterId).getClusterClient()) {
+            return queryJobStatus(clusterClient, id);
+        } catch (Exception e) {
+            throw new GatewayException("Active polling Kubernetes application status failed.", e);
+        } finally {
+            close();
+        }
+    }
+
+    /** 将 Flink 原生状态转换为 Dinky 状态，避免主动轮询链路产生另一套状态语义。 */
+    protected org.dinky.data.enums.JobStatus queryJobStatus(ClusterClient<String> clusterClient, String jobId)
+            throws Exception {
+        JobStatus status =
+                clusterClient.getJobStatus(JobID.fromHexString(jobId)).get(15, TimeUnit.SECONDS);
+        return org.dinky.data.enums.JobStatus.get(status.name());
     }
 
     /**

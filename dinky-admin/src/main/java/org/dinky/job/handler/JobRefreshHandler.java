@@ -24,6 +24,7 @@ import static org.dinky.utils.JsonUtils.objectMapper;
 import org.dinky.api.FlinkAPI;
 import org.dinky.assertion.Asserts;
 import org.dinky.cluster.FlinkClusterInfo;
+import org.dinky.configure.ApplicationMonitorProperties;
 import org.dinky.context.SpringContextUtils;
 import org.dinky.context.TenantContextHolder;
 import org.dinky.data.constant.FlinkRestResultConstant;
@@ -45,6 +46,7 @@ import org.dinky.data.model.job.JobInstance;
 import org.dinky.gateway.Gateway;
 import org.dinky.gateway.config.GatewayConfig;
 import org.dinky.gateway.exception.NotSupportGetStatusException;
+import org.dinky.gateway.kubernetes.KubernetesApplicationGateway;
 import org.dinky.gateway.model.FlinkClusterConfig;
 import org.dinky.init.FlinkHistoryServer;
 import org.dinky.job.JobConfig;
@@ -83,12 +85,14 @@ public class JobRefreshHandler {
     private static final JobHistoryService jobHistoryService;
     private static final ClusterInstanceService clusterInstanceService;
     private static final HistoryService historyService;
+    private static final ApplicationMonitorProperties applicationMonitorProperties;
 
     static {
         jobInstanceService = SpringContextUtils.getBean("jobInstanceServiceImpl", JobInstanceService.class);
         jobHistoryService = SpringContextUtils.getBean("jobHistoryServiceImpl", JobHistoryService.class);
         clusterInstanceService = SpringContextUtils.getBean("clusterInstanceServiceImpl", ClusterInstanceService.class);
         historyService = SpringContextUtils.getBean("historyServiceImpl", HistoryService.class);
+        applicationMonitorProperties = SpringContextUtils.getBeanByClass(ApplicationMonitorProperties.class);
     }
 
     /**
@@ -136,17 +140,32 @@ public class JobRefreshHandler {
 
         if (Asserts.isNull(jobDataDto.getJob()) || jobDataDto.isError()) {
             Optional<JobStatus> jobStatus = getJobStatus(jobInfoDetail);
-            if (jobStatus.isPresent() && JobStatus.isDone(jobStatus.get().getValue())) {
-                jobInstance.setStatus(jobStatus.get().getValue());
+            boolean isKubernetesActivePolling = isKubernetesActivePolling(jobInfoDetail);
+            boolean shouldApplyPolledStatus = jobStatus.isPresent()
+                    && (isKubernetesActivePolling
+                            || JobStatus.isDone(jobStatus.get().getValue()));
+            if (shouldApplyPolledStatus) {
+                JobStatus polledStatus = jobStatus.get();
+                jobInstance.setStatus(polledStatus.getValue());
+                if (JobStatus.isDone(polledStatus.getValue())) {
+                    if (jobInstance.getFinishTime() == null
+                            || TimeUtil.localDateTimeToLong(jobInstance.getFinishTime()) < 1) {
+                        jobInstance.setFinishTime(LocalDateTime.now());
+                    }
+                } else {
+                    // 主动查询确认作业仍在运行时清除结束时间，避免 REST 不可达导致一分钟后被误判为结束。
+                    jobInstance.setFinishTime(TimeUtil.toLocalDateTime(-1L));
+                }
             } else {
                 // If the job fails to get it, the default Finish Time is the current time
                 jobInstance.setStatus(JobStatus.RECONNECTING.getValue());
                 jobInstance.setError(jobDataDto.getErrorMsg());
                 jobInfoDetail.getJobDataDto().setError(true);
                 jobInfoDetail.getJobDataDto().setErrorMsg(jobDataDto.getErrorMsg());
-            }
-            if (jobInstance.getFinishTime() == null || TimeUtil.localDateTimeToLong(jobInstance.getFinishTime()) < 1) {
-                jobInstance.setFinishTime(LocalDateTime.now());
+                if (jobInstance.getFinishTime() == null
+                        || TimeUtil.localDateTimeToLong(jobInstance.getFinishTime()) < 1) {
+                    jobInstance.setFinishTime(LocalDateTime.now());
+                }
             }
         } else {
             jobInfoDetail.setJobDataDto(jobDataDto);
@@ -308,26 +327,54 @@ public class JobRefreshHandler {
 
         ClusterConfigurationDTO clusterCfg = jobInfoDetail.getClusterConfiguration();
         ClusterInstance clusterInstance = jobInfoDetail.getClusterInstance();
-        if (!Asserts.isNull(clusterCfg)
-                && (GatewayType.YARN_PER_JOB.getLongValue().equals(clusterInstance.getType())
-                        || GatewayType.YARN_APPLICATION.getLongValue().equals(clusterInstance.getType()))) {
-            try {
-                String appId = jobInfoDetail.getClusterInstance().getName();
+        if (Asserts.isNull(clusterCfg) || Asserts.isNull(clusterInstance)) {
+            return Optional.empty();
+        }
 
-                GatewayConfig gatewayConfig = GatewayConfig.build(clusterCfg.getConfig());
+        GatewayType gatewayType = GatewayType.get(clusterInstance.getType());
+        boolean isYarnApplication =
+                GatewayType.YARN_PER_JOB == gatewayType || GatewayType.YARN_APPLICATION == gatewayType;
+        boolean isKubernetesActivePolling = isKubernetesActivePolling(jobInfoDetail);
+        if (!isYarnApplication && !isKubernetesActivePolling) {
+            return Optional.empty();
+        }
+
+        try {
+            String appId = clusterInstance.getName();
+            String jobId = jobInfoDetail.getInstance().getJid();
+
+            GatewayConfig gatewayConfig = GatewayConfig.build(clusterCfg.getConfig());
+            if (isKubernetesActivePolling) {
+                // 注册集群 ID 会拼接 Flink Job ID，重连 Kubernetes 时必须还原真实 Deployment 名称。
+                String clusterId = KubernetesApplicationGateway.resolveClusterId(appId, jobId);
+                gatewayConfig.getClusterConfig().setAppId(clusterId);
+                gatewayConfig.getFlinkConfig().setJobName(clusterId);
+                gatewayConfig.getFlinkConfig().setJobId(jobId);
+                appId = jobId;
+            } else {
                 gatewayConfig.getClusterConfig().setAppId(appId);
                 gatewayConfig
                         .getFlinkConfig()
                         .setJobName(jobInfoDetail.getInstance().getName());
-
-                Gateway gateway = Gateway.build(gatewayConfig);
-                return Optional.of(gateway.getJobStatusById(appId));
-            } catch (NotSupportGetStatusException ignored) {
-                // if the gateway does not support get status, then use the api to get job status
-                // ignore to do something here
             }
+
+            Gateway gateway = Gateway.build(gatewayConfig);
+            return Optional.of(gateway.getJobStatusById(appId));
+        } catch (NotSupportGetStatusException ignored) {
+            // if the gateway does not support get status, then use the api to get job status
+            // ignore to do something here
+        } catch (Exception e) {
+            log.warn("Active polling application status failed: {}", e.getMessage());
         }
         return Optional.empty();
+    }
+
+    /** 仅对 Kubernetes Application 开启完整状态补查，避免改变其他部署模式的原有兜底语义。 */
+    private static boolean isKubernetesActivePolling(JobInfoDetail jobInfoDetail) {
+        ClusterInstance clusterInstance = jobInfoDetail.getClusterInstance();
+        return applicationMonitorProperties.isActivePollingEnabled()
+                && Asserts.isNotNull(clusterInstance)
+                && GatewayType.KUBERNETES_APPLICATION == GatewayType.get(clusterInstance.getType());
     }
 
     /**

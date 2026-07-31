@@ -6,6 +6,12 @@ server:
   port: 8888
   shutdown: graceful
 
+dinky:
+  application-monitor:
+    # 开启后，Dinky 在 Flink REST 刷新失败时会通过 Kubernetes/Flink 客户端主动查询 Application 状态。
+    # 未配置或关闭时保持现有监控与回调模式。
+    active-polling-enabled: false
+
 spring:
   # Dinky application name
   application:

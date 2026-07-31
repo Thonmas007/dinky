@@ -24,9 +24,14 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import org.dinky.data.enums.JobStatus;
+
+import org.apache.flink.api.common.JobID;
+import org.apache.flink.client.program.ClusterClient;
 import org.apache.flink.kubernetes.kubeclient.FlinkKubeClient;
 
 import java.util.Collections;
+import java.util.concurrent.CompletableFuture;
 
 import org.junit.Test;
 
@@ -43,5 +48,28 @@ public class KubernetesGatewayTest {
 
         assertThat(visiblePodCount).isZero();
         verify(client).getPodsWithLabels(Collections.emptyMap());
+    }
+
+    /** 验证主动轮询沿用 Dinky 状态枚举，避免页面出现无法识别的 Flink 原生状态。 */
+    @Test
+    public void testQueryJobStatus() throws Exception {
+        String jobId = "0123456789abcdef0123456789abcdef";
+        ClusterClient<String> clusterClient = mock(ClusterClient.class);
+        when(clusterClient.getJobStatus(JobID.fromHexString(jobId)))
+                .thenReturn(CompletableFuture.completedFuture(org.apache.flink.api.common.JobStatus.RUNNING));
+
+        KubernetesApplicationGateway gateway = new KubernetesApplicationGateway();
+        assertThat(gateway.queryJobStatus(clusterClient, jobId)).isEqualTo(JobStatus.RUNNING);
+    }
+
+    /** 验证自动注册标识可还原为 Kubernetes Deployment 名称，保证轮询连接到正确集群。 */
+    @Test
+    public void testResolveClusterId() {
+        String jobId = "0123456789abcdef0123456789abcdef";
+
+        assertThat(KubernetesApplicationGateway.resolveClusterId("demo-job" + jobId, jobId))
+                .isEqualTo("demo-job");
+        assertThat(KubernetesApplicationGateway.resolveClusterId("demo-job", jobId))
+                .isEqualTo("demo-job");
     }
 }
