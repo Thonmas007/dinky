@@ -77,9 +77,10 @@ public final class FeiShuSender {
         params.put(FeiShuConstants.ALERT_TEMPLATE_CONTENT, content);
         params.put(FeiShuConstants.ALERT_TEMPLATE_KEYWORD, feiShuParams.getKeyword());
         if (Asserts.isNotNullString(feiShuParams.getSecret())) {
-            Integer currentTimeMillis = Math.toIntExact(System.currentTimeMillis() / 1000) - 1800;
-            params.put(FeiShuConstants.SIGN_TMESTAMP, currentTimeMillis);
-            params.put(FeiShuConstants.SIGN, getSign(feiShuParams.getSecret(), currentTimeMillis));
+            // Lark 只接受与服务端当前时间相差一小时内的 Unix 秒时间戳，不能人为补偿时区。
+            long currentTimestamp = System.currentTimeMillis() / 1000;
+            params.put(FeiShuConstants.SIGN_TMESTAMP, currentTimestamp);
+            params.put(FeiShuConstants.SIGN, getSign(feiShuParams.getSecret(), currentTimestamp));
         }
         List<String> atUsers = CollectionUtils.isEmpty(feiShuParams.getAtUsers())
                 ? Collections.singletonList("all")
@@ -113,10 +114,11 @@ public final class FeiShuSender {
      * @param timestamp timestamp
      * @return sign
      */
-    private String getSign(String secretKey, Integer timestamp) {
+    private String getSign(String secretKey, long timestamp) {
         if (Math.abs(System.currentTimeMillis() / 1000 - timestamp) > 3600) {
             throw new IllegalArgumentException("timestamp is invalid, must be within 1 hour of current time");
         }
+        // Lark 约定 timestamp 与密钥拼接后的内容作为 HMAC key，待签名消息为空字节数组。
         String stringToSign = timestamp + FeiShuConstants.ENTER_LINE + secretKey;
         String sign = "";
         try {

@@ -1,4 +1,8 @@
 {
+<#if timestamp?? && sign??>
+    "timestamp": "${timestamp?c}",
+    "sign": "${sign?json_string}",
+</#if>
     "msg_type": "interactive",
     "card": {
         "elements": [
