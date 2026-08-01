@@ -85,12 +85,15 @@ export default (props: {
     const uploadProp: UploadProps = {
       beforeUpload: (file: RcFile) => {
         const reader = new FileReader();
-        reader.readAsText(file);
         reader.onload = () => {
           const value = reader.result as string;
           form.setFieldValue(name, value);
           editorRef?.setValue(value);
         };
+        reader.readAsText(file);
+
+        // 此处只把本地配置读入编辑器，不应触发 Upload 默认向当前页面发起 POST 请求。
+        return false;
       },
       showUploadList: false
     };
