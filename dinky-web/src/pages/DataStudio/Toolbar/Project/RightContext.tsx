@@ -43,6 +43,8 @@ import JobModal from '@/pages/DataStudio/Toolbar/Project/JobModal';
 import { assert } from '@/pages/DataStudio/utils';
 import { FOLDER_RIGHT_MENU, JOB_RIGHT_MENU } from '@/pages/DataStudio/Toolbar/Project/constants';
 import JobImportModal from '@/pages/DataStudio/Toolbar/Project/JobImportModal';
+import { JOB_LIFE_CYCLE } from '@/pages/DevOps/constants';
+import { cleanupFailedKubernetesTask } from '@/pages/DataStudio/service';
 const { Text } = Typography;
 export type RightContextProps = {
   selectKeys: Key[];
@@ -79,10 +81,13 @@ export const useRightContext = (props: RightContextProps) => {
     setProjectState((prevState) => ({
       ...prevState,
       menuItems: prevState.isLeaf
-        ? JOB_RIGHT_MENU(prevState.isCut && prevState.cutId !== undefined)
+        ? JOB_RIGHT_MENU(
+            prevState.isCut && prevState.cutId !== undefined,
+            prevState.value?.task?.step === JOB_LIFE_CYCLE.PUBLISH
+          )
         : FOLDER_RIGHT_MENU(prevState.isCut && prevState.cutId !== undefined)
     }));
-  }, [projectState.isCut, projectState.cutId]);
+  }, [projectState.isCut, projectState.cutId, projectState.value?.task?.step]);
 
   const handleUploadCancel = async () => {
     setImportVisible(false);
@@ -105,7 +110,10 @@ export const useRightContext = (props: RightContextProps) => {
       ...prevState,
       isLeaf: isLeaf,
       menuItems: isLeaf
-        ? JOB_RIGHT_MENU(prevState.isCut && prevState.cutId !== undefined)
+        ? JOB_RIGHT_MENU(
+            prevState.isCut && prevState.cutId !== undefined,
+            fullInfo?.task?.step === JOB_LIFE_CYCLE.PUBLISH
+          )
         : FOLDER_RIGHT_MENU(prevState.isCut && prevState.cutId !== undefined),
       contextMenuOpen: true,
       rightClickedNode: { ...node, ...fullInfo },
@@ -169,6 +177,22 @@ export const useRightContext = (props: RightContextProps) => {
           });
         });
         await refresh();
+      }
+    });
+  };
+
+  /** 下线任务可能仍残留 Flink Application，通过任务配置删除对应的 Kubernetes Pod。 */
+  const handleDeletePod = () => {
+    const { name, taskId } = projectState.value;
+    handleContextCancel();
+    Modal.confirm({
+      title: '确认删除 Pod？',
+      content: `将检查并删除 Kubernetes 中的同名任务：${name}`,
+      okText: '删除 Pod',
+      okButtonProps: { danger: true },
+      cancelText: l('button.cancel'),
+      onOk: async () => {
+        await cleanupFailedKubernetesTask('正在删除 Pod', taskId);
       }
     });
   };
@@ -325,6 +349,9 @@ export const useRightContext = (props: RightContextProps) => {
         break;
       case 'delete':
         await handleDeleteSubmit();
+        break;
+      case 'deletePod':
+        handleDeletePod();
         break;
       case 'renameFolder':
         await handleRename();

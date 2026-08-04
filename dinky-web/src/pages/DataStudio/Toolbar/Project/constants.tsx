@@ -91,7 +91,7 @@ export const FOLDER_RIGHT_MENU = (disabled = false): MenuItemType[] => [
  *    删除
  * @type {({icon: JSX.Element, label: string, key: string} | {icon: JSX.Element, label: string, key: string} | {icon: JSX.Element, label: string, key: string} | {icon: JSX.Element, label: string, key: string})[]}
  */
-export const JOB_RIGHT_MENU = (disabled = false): MenuItemType[] => [
+export const JOB_RIGHT_MENU = (disabled = false, deletePodDisabled = true): MenuItemType[] => [
   {
     key: 'edit',
     icon: <EditTwoTone />,
@@ -112,6 +112,12 @@ export const JOB_RIGHT_MENU = (disabled = false): MenuItemType[] => [
     key: 'delete',
     icon: <DeleteTwoTone twoToneColor={'red'} />,
     label: l('button.delete')
+  },
+  {
+    key: 'deletePod',
+    icon: <DeleteTwoTone twoToneColor={'red'} />,
+    label: '删除 Pod',
+    disabled: deletePodDisabled
   },
   {
     key: 'exportJson',
