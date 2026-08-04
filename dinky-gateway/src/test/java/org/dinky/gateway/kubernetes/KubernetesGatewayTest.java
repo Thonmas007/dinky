@@ -78,10 +78,15 @@ public class KubernetesGatewayTest {
     public void testBuildRestQueryUrl() {
         String webUrl = "http://demo-job-rest.flink-dev:8081";
 
-        assertThat(KubernetesApplicationGateway.buildRestQueryUrl("172.20.10.8", webUrl))
+        assertThat(KubernetesApplicationGateway.buildRestQueryUrl("ClusterIP", "172.20.10.8", webUrl))
                 .isEqualTo("http://172.20.10.8:8081");
-        assertThat(KubernetesApplicationGateway.buildRestQueryUrl("None", webUrl))
+        assertThat(KubernetesApplicationGateway.buildRestQueryUrl("NodePort", "172.20.10.8", webUrl))
                 .isEqualTo(webUrl);
-        assertThat(KubernetesApplicationGateway.buildRestQueryUrl(null, webUrl)).isEqualTo(webUrl);
+        assertThat(KubernetesApplicationGateway.buildRestQueryUrl("LoadBalancer", "172.20.10.8", webUrl))
+                .isEqualTo(webUrl);
+        assertThat(KubernetesApplicationGateway.buildRestQueryUrl("ClusterIP", "None", webUrl))
+                .isEqualTo(webUrl);
+        assertThat(KubernetesApplicationGateway.buildRestQueryUrl("ClusterIP", null, webUrl))
+                .isEqualTo(webUrl);
     }
 }

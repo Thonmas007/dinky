@@ -346,6 +346,11 @@ public class KubernetesApplicationGateway extends KubernetesGateway {
                     String queryUrl = resolveRestQueryUrl(kubernetesClient, deployment, webUrl);
                     logger.info("Start get Kubernetes application job overview from {}", queryUrl);
                     JobDetails jobDetails = invokeJobsOverviewApi(queryUrl);
+                    // ClusterIP 可能对集群外部署的 Dinky 不可达，失败时回退到 Flink 提供的 NodePort/外部地址。
+                    if (Objects.isNull(jobDetails) && !StringUtils.equals(queryUrl, webUrl)) {
+                        logger.warn("Get job overview from {} failed, fallback to {}", queryUrl, webUrl);
+                        jobDetails = invokeJobsOverviewApi(webUrl);
+                    }
                     if (Objects.isNull(jobDetails) || CollectionUtils.isEmpty(jobDetails.getJobs())) {
                         logger.info("Kubernetes application job is not ready, will retry later");
                         continue;
@@ -371,7 +376,7 @@ public class KubernetesApplicationGateway extends KubernetesGateway {
                 "The number of retries exceeds the limit, check the K8S cluster for more information");
     }
 
-    /** 状态确认直接使用当前 REST Service 的 ClusterIP，规避同名 Service 重建后的 JVM DNS 缓存。 */
+    /** ClusterIP 模式使用当前 Service 地址规避旧 DNS 缓存，其他暴露模式保留 Flink 返回的外部地址。 */
     protected String resolveRestQueryUrl(KubernetesClient kubernetesClient, Deployment deployment, String webUrl) {
         String namespace = deployment.getMetadata().getNamespace();
         String clusterId = deployment.getMetadata().getName();
@@ -383,12 +388,15 @@ public class KubernetesApplicationGateway extends KubernetesGateway {
         if (Objects.isNull(restService) || Objects.isNull(restService.getSpec())) {
             return webUrl;
         }
-        return buildRestQueryUrl(restService.getSpec().getClusterIP(), webUrl);
+        return buildRestQueryUrl(
+                restService.getSpec().getType(), restService.getSpec().getClusterIP(), webUrl);
     }
 
-    /** ClusterIP 未分配或为 Headless Service 时保留 Flink 返回的原始地址。 */
-    static String buildRestQueryUrl(String clusterIp, String webUrl) {
-        if (StringUtils.isBlank(clusterIp) || "None".equalsIgnoreCase(clusterIp)) {
+    /** NodePort、LoadBalancer、Headless 等场景需要使用 Flink 返回的可访问地址。 */
+    static String buildRestQueryUrl(String serviceType, String clusterIp, String webUrl) {
+        if (!"ClusterIP".equalsIgnoreCase(serviceType)
+                || StringUtils.isBlank(clusterIp)
+                || "None".equalsIgnoreCase(clusterIp)) {
             return webUrl;
         }
         return StrFormatter.format("http://{}:8081", clusterIp);
