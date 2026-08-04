@@ -59,10 +59,12 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Lock;
 
 import org.yaml.snakeyaml.Yaml;
 
 import com.alibaba.fastjson2.JSONObject;
+import com.google.common.util.concurrent.Striped;
 
 import cn.hutool.core.date.SystemClock;
 import cn.hutool.core.text.StrFormatter;
@@ -71,6 +73,7 @@ import cn.hutool.http.HttpStatus;
 import cn.hutool.http.HttpUtil;
 import io.fabric8.kubernetes.api.model.ContainerStatus;
 import io.fabric8.kubernetes.api.model.Pod;
+import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
 import io.fabric8.kubernetes.api.model.networking.v1.Ingress;
 import io.fabric8.kubernetes.client.KubernetesClient;
@@ -81,6 +84,9 @@ import lombok.extern.slf4j.Slf4j;
  */
 @Slf4j
 public class KubernetesApplicationGateway extends KubernetesGateway {
+
+    private static final int EXISTING_CLUSTER_DELETE_TIMEOUT_SECONDS = 60;
+    private static final Striped<Lock> SUBMIT_LOCKS = Striped.lazyWeakLock(128);
 
     /**
      * @return The type of the Kubernetes gateway, which is GatewayType.KUBERNETES_APPLICATION.
@@ -138,7 +144,13 @@ public class KubernetesApplicationGateway extends KubernetesGateway {
     @Override
     public GatewayResult submitJar(FlinkUdfPathContextHolder udfPathContextHolder) {
         init();
+        String namespace = configuration.getString(KubernetesConfigOptions.NAMESPACE);
+        String clusterId = configuration.getString(KubernetesConfigOptions.CLUSTER_ID);
+        // 同一任务的并发提交必须串行化，否则后到请求可能删除前一个请求刚创建的集群。
+        Lock submitLock = SUBMIT_LOCKS.get(namespace + "/" + clusterId);
+        submitLock.lock();
         try (KubernetesClient kubernetesClient = getK8sClientHelper().getKubernetesClient()) {
+            cleanupExistingApplication(kubernetesClient, namespace, clusterId);
             logger.info("Start submit k8s application.");
 
             ClusterClientProvider<String> clusterClient =
@@ -168,8 +180,79 @@ public class KubernetesApplicationGateway extends KubernetesGateway {
         } catch (Exception ex) {
             throw new RuntimeException(ex);
         } finally {
+            submitLock.unlock();
             close();
         }
+    }
+
+    /** 二次提交前清理同名 Flink Application，避免旧资源和 Service 地址被新任务复用。 */
+    protected void cleanupExistingApplication(KubernetesClient kubernetesClient, String namespace, String clusterId)
+            throws InterruptedException {
+        if (!hasExistingApplicationResources(kubernetesClient, namespace, clusterId)) {
+            return;
+        }
+
+        logger.warn(
+                "Kubernetes application {} already exists in namespace {}, delete it before resubmit",
+                clusterId,
+                namespace);
+        getK8sClientHelper().getClient().stopAndCleanupCluster(clusterId);
+
+        for (int retry = 0; retry < EXISTING_CLUSTER_DELETE_TIMEOUT_SECONDS; retry++) {
+            if (!hasExistingApplicationResources(kubernetesClient, namespace, clusterId)) {
+                logger.info("Existing Kubernetes application {} has been deleted", clusterId);
+                return;
+            }
+            Thread.sleep(1000);
+        }
+        throw new GatewayException(StrFormatter.format(
+                "Delete existing Kubernetes application {} timed out after {} seconds",
+                clusterId,
+                EXISTING_CLUSTER_DELETE_TIMEOUT_SECONDS));
+    }
+
+    /** 供提交失败后的人工兜底操作使用，仅在同名 Kubernetes Application 仍存在时执行清理。 */
+    public boolean cleanupExistingApplication() {
+        init();
+        String namespace = configuration.getString(KubernetesConfigOptions.NAMESPACE);
+        String clusterId = configuration.getString(KubernetesConfigOptions.CLUSTER_ID);
+        Lock submitLock = SUBMIT_LOCKS.get(namespace + "/" + clusterId);
+        submitLock.lock();
+        try (KubernetesClient kubernetesClient = getK8sClientHelper().getKubernetesClient()) {
+            boolean exists = hasExistingApplicationResources(kubernetesClient, namespace, clusterId);
+            if (exists) {
+                cleanupExistingApplication(kubernetesClient, namespace, clusterId);
+            }
+            return exists;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new GatewayException("Interrupted while cleaning existing Kubernetes application", e);
+        } finally {
+            submitLock.unlock();
+            close();
+        }
+    }
+
+    /** Deployment 与内外部 Service 均消失后才能重建，避免残留资源影响新任务。 */
+    protected boolean hasExistingApplicationResources(
+            KubernetesClient kubernetesClient, String namespace, String clusterId) {
+        Deployment deployment = kubernetesClient
+                .apps()
+                .deployments()
+                .inNamespace(namespace)
+                .withName(clusterId)
+                .get();
+        Service restService = kubernetesClient
+                .services()
+                .inNamespace(namespace)
+                .withName(clusterId + "-rest")
+                .get();
+        Service internalService = kubernetesClient
+                .services()
+                .inNamespace(namespace)
+                .withName(clusterId)
+                .get();
+        return Objects.nonNull(deployment) || Objects.nonNull(restService) || Objects.nonNull(internalService);
     }
 
     /**
@@ -260,13 +343,15 @@ public class KubernetesApplicationGateway extends KubernetesGateway {
                     // Kubernetes 集群内的 Flink REST 已可直接访问时，绕过可能无法完成的 ClusterClient 异步请求，
                     // 避免作业实际已运行但 Dinky 因 listJobs Future 超时而将提交误判为失败。
                     String webUrl = client.getWebInterfaceURL();
-                    logger.info("Start get Kubernetes application job overview from {}", webUrl);
-                    JobDetails jobDetails = invokeJobsOverviewApi(webUrl);
+                    String queryUrl = resolveRestQueryUrl(kubernetesClient, deployment, webUrl);
+                    logger.info("Start get Kubernetes application job overview from {}", queryUrl);
+                    JobDetails jobDetails = invokeJobsOverviewApi(queryUrl);
                     if (Objects.isNull(jobDetails) || CollectionUtils.isEmpty(jobDetails.getJobs())) {
                         logger.info("Kubernetes application job is not ready, will retry later");
                         continue;
                     }
-                    JobOverviewInfo job = jobDetails.getJobs().stream().findFirst().get();
+                    JobOverviewInfo job =
+                            jobDetails.getJobs().stream().findFirst().get();
                     // To create a cluster ID, you need to combine the cluster ID with the jobID to ensure uniqueness
                     String cid = configuration.getString(KubernetesConfigOptions.CLUSTER_ID) + job.getJid();
                     logger.info("Success get Kubernetes application job status: {}", job.getState());
@@ -284,6 +369,29 @@ public class KubernetesApplicationGateway extends KubernetesGateway {
         }
         throw new GatewayException(
                 "The number of retries exceeds the limit, check the K8S cluster for more information");
+    }
+
+    /** 状态确认直接使用当前 REST Service 的 ClusterIP，规避同名 Service 重建后的 JVM DNS 缓存。 */
+    protected String resolveRestQueryUrl(KubernetesClient kubernetesClient, Deployment deployment, String webUrl) {
+        String namespace = deployment.getMetadata().getNamespace();
+        String clusterId = deployment.getMetadata().getName();
+        Service restService = kubernetesClient
+                .services()
+                .inNamespace(namespace)
+                .withName(clusterId + "-rest")
+                .get();
+        if (Objects.isNull(restService) || Objects.isNull(restService.getSpec())) {
+            return webUrl;
+        }
+        return buildRestQueryUrl(restService.getSpec().getClusterIP(), webUrl);
+    }
+
+    /** ClusterIP 未分配或为 Headless Service 时保留 Flink 返回的原始地址。 */
+    static String buildRestQueryUrl(String clusterIp, String webUrl) {
+        if (StringUtils.isBlank(clusterIp) || "None".equalsIgnoreCase(clusterIp)) {
+            return webUrl;
+        }
+        return StrFormatter.format("http://{}:8081", clusterIp);
     }
 
     /**

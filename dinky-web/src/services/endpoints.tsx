@@ -273,6 +273,7 @@ export enum API_CONSTANTS {
   TASK = '/api/task',
   MY_TASK = '/api/task/getUserTask',
   CANCEL_JOB = '/api/task/cancel',
+  CLEANUP_FAILED_KUBERNETES_TASK = '/api/task/cleanupFailedKubernetesTask',
   JSON_TO_FLINK_SQL = '/api/tools/jsonToFlinkSql',
   EXPLAIN_SQL = '/api/task/explainSql',
   GET_JOB_PLAN = '/api/task/getJobPlan',

@@ -56,6 +56,10 @@ export function cancelTask(
   return handleGetOption(API_CONSTANTS.CANCEL_JOB, title, { id, withSavePoint, forceCancel });
 }
 
+export function cleanupFailedKubernetesTask(title: string, id: number) {
+  return handleGetOption(API_CONSTANTS.CLEANUP_FAILED_KUBERNETES_TASK, title, { id });
+}
+
 export async function executeSql(title: string, id: number) {
   return handleGetOption(API_CONSTANTS.SUBMIT_TASK, title, { id });
 }

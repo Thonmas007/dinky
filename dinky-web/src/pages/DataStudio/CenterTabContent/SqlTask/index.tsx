@@ -18,7 +18,7 @@
  */
 
 import { CenterTab, DataStudioState } from '@/pages/DataStudio/model';
-import { Button, Col, Divider, Flex, Row, Skeleton, TabsProps } from 'antd';
+import { Button, Col, Divider, Flex, Modal, Row, Skeleton, TabsProps } from 'antd';
 import '../index.less';
 import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { registerEditorKeyBindingAndAction } from '@/utils/function';
@@ -70,6 +70,7 @@ import { debounce } from 'lodash';
 import {
   cancelTask,
   changeTaskLife,
+  cleanupFailedKubernetesTask,
   debugTask,
   executeSql,
   explainSql,
@@ -239,8 +240,13 @@ export const SqlTask = memo((props: FlinkSqlProps & any) => {
         });
         setOriginStatementValue(sqlConvertForm?.initSqlStatement ?? '');
         updateCenterTab({ ...props.tabData, params: newParams });
-        if (params?.statement && !(params?.statement == sqlConvertForm?.initSqlStatement
-          || params?.statement == taskDetail?.statement)) {
+        if (
+          params?.statement &&
+          !(
+            params?.statement == sqlConvertForm?.initSqlStatement ||
+            params?.statement == taskDetail?.statement
+          )
+        ) {
           setDiff([
             { key: 'statement', server: sqlConvertForm?.initSqlStatement, cache: params.statement }
           ]);
@@ -637,6 +643,24 @@ export const SqlTask = memo((props: FlinkSqlProps & any) => {
     setIsRunning(false);
   }, [currentState.taskId]);
 
+  // Dinky 提交失败时可能未生成有效 JobInstance，需要直接按任务配置检查并停止 K8s Application。
+  const handleCleanupFailedKubernetesTask = useCallback(() => {
+    Modal.confirm({
+      title: '确认停止 K8s 中的同名任务？',
+      content: `将检查并删除 Kubernetes 中的同名任务：${currentState.name}`,
+      okText: '停止任务',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        const result = await cleanupFailedKubernetesTask('正在检查 K8s 任务', currentState.taskId);
+        if (result?.data) {
+          setCurrentState((prevState) => ({ ...prevState, status: 'CANCEL' }));
+          setIsRunning(false);
+        }
+      }
+    });
+  }, [currentState.name, currentState.taskId]);
+
   const handleGotoDevOps = useCallback(async () => {
     const dataByParams = await queryDataByParams<Jobs.JobInstance>(
       API_CONSTANTS.GET_JOB_INSTANCE_BY_TASK_ID,
@@ -940,6 +964,18 @@ export const SqlTask = memo((props: FlinkSqlProps & any) => {
                 hotKeyDesc: 'Ctrl+F2',
                 hotKeyHandle: (e: KeyboardEvent) => e.ctrlKey && e.key === 'F2'
               }}
+            />
+
+            <RunToolBarButton
+              isShow={
+                currentState.status === 'FAILED' && currentState.type === 'kubernetes-application'
+              }
+              disabled={isLockTask || isSubmitting || currentState.step === JOB_LIFE_CYCLE.PUBLISH}
+              showDesc={showDesc}
+              color={'red'}
+              desc={'停止 K8s 残留任务'}
+              icon={<XFilled style={{ color: '#b10404' }} />}
+              onClick={handleCleanupFailedKubernetesTask}
             />
 
             <RunToolBarButton

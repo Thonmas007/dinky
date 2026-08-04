@@ -142,6 +142,18 @@ public class TaskController {
         }
     }
 
+    /** Dinky 提交状态失败但 K8s 资源仍存在时，提供按任务配置检查并清理的兜底入口。 */
+    @GetMapping("/cleanupFailedKubernetesTask")
+    @Log(title = "Cleanup Failed Kubernetes Task", businessType = BusinessType.TRIGGER)
+    @ApiOperation("Cleanup a Kubernetes application left behind after task submission failed")
+    @CheckTaskOwner(checkParam = TaskId.class, checkInterface = TaskService.class)
+    public Result<Boolean> cleanupFailedKubernetesTask(@TaskId @RequestParam Integer id) {
+        boolean cleaned = taskService.cleanupFailedKubernetesTask(id);
+        return Result.succeed(
+                cleaned,
+                cleaned ? "Kubernetes task stopped successfully" : "No Kubernetes task with the same name was found");
+    }
+
     /**
      * 重启任务
      */

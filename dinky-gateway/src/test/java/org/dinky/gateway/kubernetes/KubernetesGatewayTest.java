@@ -72,4 +72,16 @@ public class KubernetesGatewayTest {
         assertThat(KubernetesApplicationGateway.resolveClusterId("demo-job", jobId))
                 .isEqualTo("demo-job");
     }
+
+    /** 验证状态确认使用当前 Service ClusterIP，避免同名任务重建后命中旧 DNS 缓存。 */
+    @Test
+    public void testBuildRestQueryUrl() {
+        String webUrl = "http://demo-job-rest.flink-dev:8081";
+
+        assertThat(KubernetesApplicationGateway.buildRestQueryUrl("172.20.10.8", webUrl))
+                .isEqualTo("http://172.20.10.8:8081");
+        assertThat(KubernetesApplicationGateway.buildRestQueryUrl("None", webUrl))
+                .isEqualTo(webUrl);
+        assertThat(KubernetesApplicationGateway.buildRestQueryUrl(null, webUrl)).isEqualTo(webUrl);
+    }
 }

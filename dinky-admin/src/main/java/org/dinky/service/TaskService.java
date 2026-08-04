@@ -120,6 +120,14 @@ public interface TaskService extends ISuperService<Task> {
     boolean cancelTaskJob(TaskDTO task, boolean withSavePoint, boolean forceCancel);
 
     /**
+     * 清理 Dinky 提交失败后仍残留在 Kubernetes 中的同名 Application。
+     *
+     * @param taskId 任务 ID
+     * @return true 表示发现并删除了残留任务，false 表示 Kubernetes 中不存在同名任务
+     */
+    boolean cleanupFailedKubernetesTask(Integer taskId);
+
+    /**
      * Get the stream graph of the given task job.
      *
      * @param taskDTO The {@link TaskDTO} object representing the task to get the stream graph for.

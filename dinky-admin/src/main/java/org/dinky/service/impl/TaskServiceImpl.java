@@ -67,8 +67,10 @@ import org.dinky.function.compiler.CustomStringJavaCompiler;
 import org.dinky.function.data.model.UDF;
 import org.dinky.function.pool.UdfCodePool;
 import org.dinky.function.util.UDFUtil;
+import org.dinky.gateway.Gateway;
 import org.dinky.gateway.enums.SavePointStrategy;
 import org.dinky.gateway.enums.SavePointType;
+import org.dinky.gateway.kubernetes.KubernetesApplicationGateway;
 import org.dinky.gateway.model.FlinkClusterConfig;
 import org.dinky.gateway.model.JobInfo;
 import org.dinky.gateway.result.SavePointResult;
@@ -469,6 +471,24 @@ public class TaskServiceImpl extends SuperServiceImpl<TaskMapper, Task> implemen
         }
         jobInstanceService.refreshJobInfoDetail(jobInstance.getId(), jobInstance.getTaskId(), true);
         return isSuccess;
+    }
+
+    /** 提交结果登记失败时按任务配置直接检查 K8s，绕过不存在或不完整的 JobInstance。 */
+    @Override
+    public boolean cleanupFailedKubernetesTask(Integer taskId) {
+        TaskDTO task = getTaskInfoById(taskId);
+        DinkyAssert.check(task);
+        GatewayType gatewayType = GatewayType.get(task.getType());
+        if (gatewayType != GatewayType.KUBERNETES_APPLICATION) {
+            throw new BusException("Only Kubernetes Application tasks support residual resource cleanup");
+        }
+
+        JobConfig jobConfig = buildJobSubmitConfig(task);
+        Gateway gateway = Gateway.build(jobConfig.getGatewayConfig());
+        if (!(gateway instanceof KubernetesApplicationGateway)) {
+            throw new BusException("The task is not configured with Kubernetes Application Gateway");
+        }
+        return ((KubernetesApplicationGateway) gateway).cleanupExistingApplication();
     }
 
     @Override
