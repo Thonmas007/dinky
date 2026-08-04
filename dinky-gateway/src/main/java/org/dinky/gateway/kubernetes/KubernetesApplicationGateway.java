@@ -52,9 +52,7 @@ import org.apache.flink.kubernetes.KubernetesClusterDescriptor;
 import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
 import org.apache.flink.kubernetes.kubeclient.FlinkKubeClient;
 import org.apache.flink.kubernetes.utils.Constants;
-import org.apache.flink.runtime.client.JobStatusMessage;
 
-import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -259,31 +257,27 @@ public class KubernetesApplicationGateway extends KubernetesGateway {
                     continue;
                 }
                 try (ClusterClient<String> client = clusterClient.getClusterClient()) {
-                    logger.info("Start get job list ....");
-                    Collection<JobStatusMessage> jobList = client.listJobs().get(15, TimeUnit.SECONDS);
-                    if (jobList == null) {
-                        logger.error("Get job list is failed, Please check your Network !!");
-                        continue;
-                    } else {
-                        logger.info("Get K8S Job list: {}", jobList);
-                    }
-                    if (jobList.isEmpty()) {
-                        logger.error("Get job is empty, will be reconnect later....");
+                    // Kubernetes 集群内的 Flink REST 已可直接访问时，绕过可能无法完成的 ClusterClient 异步请求，
+                    // 避免作业实际已运行但 Dinky 因 listJobs Future 超时而将提交误判为失败。
+                    String webUrl = client.getWebInterfaceURL();
+                    logger.info("Start get Kubernetes application job overview from {}", webUrl);
+                    JobDetails jobDetails = invokeJobsOverviewApi(webUrl);
+                    if (Objects.isNull(jobDetails) || CollectionUtils.isEmpty(jobDetails.getJobs())) {
+                        logger.info("Kubernetes application job is not ready, will retry later");
                         continue;
                     }
-                    JobStatusMessage job = jobList.stream().findFirst().get();
-                    JobStatus jobStatus = client.getJobStatus(job.getJobId()).get();
+                    JobOverviewInfo job = jobDetails.getJobs().stream().findFirst().get();
                     // To create a cluster ID, you need to combine the cluster ID with the jobID to ensure uniqueness
-                    String cid = configuration.getString(KubernetesConfigOptions.CLUSTER_ID)
-                            + job.getJobId().toHexString();
-                    logger.info("Success get job status:{}", jobStatus);
-                    return result.setWebURL(client.getWebInterfaceURL())
-                            .setJids(Collections.singletonList(job.getJobId().toHexString()))
+                    String cid = configuration.getString(KubernetesConfigOptions.CLUSTER_ID) + job.getJid();
+                    logger.info("Success get Kubernetes application job status: {}", job.getState());
+                    return result.setWebURL(webUrl)
+                            .setJids(Collections.singletonList(job.getJid()))
                             .setId(cid);
                 } catch (GatewayException e) {
                     throw e;
                 } catch (Exception ex) {
-                    logger.error("Get job status failed,{}", ex.getMessage());
+                    // 输出完整异常堆栈，避免 TimeoutException 等无 message 异常被记录成 null，影响提交故障定位。
+                    logger.error("Get Kubernetes application job status failed.", ex);
                 }
             }
             Thread.sleep(5000);
@@ -383,7 +377,8 @@ public class KubernetesApplicationGateway extends KubernetesGateway {
                 return jobDetails;
             }
         } catch (Exception e) {
-            logger.warn("Get job overview warning, task manage is enabled and can be ignored");
+            // REST 暂未就绪属于启动阶段的可重试状态，但保留异常类型与地址便于区分网络和响应解析问题。
+            logger.warn("Get job overview from {} failed: {}", restUrl, e.toString());
         }
         return null;
     }
