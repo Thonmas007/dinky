@@ -50,7 +50,8 @@
 
     <properties>
         <assertj.version>3.21.0</assertj.version>
-        <aws-java-sdk-s3.version>1.12.645</aws-java-sdk-s3.version>
+        <!-- EKS Pod Identity 要求 AWS SDK for Java 1.x 不低于 1.12.746。 -->
+        <aws-java-sdk-s3.version>1.12.782</aws-java-sdk-s3.version>
         <build-helper-maven-plugin.version>1.7</build-helper-maven-plugin.version>
         <clickhouse.version>0.6.2</clickhouse.version>
         <commons-email>1.5</commons-email>
