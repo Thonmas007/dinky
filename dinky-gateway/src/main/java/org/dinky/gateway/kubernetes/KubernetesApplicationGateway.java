@@ -72,11 +72,13 @@ import cn.hutool.http.HttpResponse;
 import cn.hutool.http.HttpStatus;
 import cn.hutool.http.HttpUtil;
 import io.fabric8.kubernetes.api.model.ContainerStatus;
+import io.fabric8.kubernetes.api.model.GenericKubernetesResource;
 import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
 import io.fabric8.kubernetes.api.model.networking.v1.Ingress;
 import io.fabric8.kubernetes.client.KubernetesClient;
+import io.fabric8.kubernetes.client.dsl.base.ResourceDefinitionContext;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -87,6 +89,14 @@ public class KubernetesApplicationGateway extends KubernetesGateway {
 
     private static final int EXISTING_CLUSTER_DELETE_TIMEOUT_SECONDS = 60;
     private static final Striped<Lock> SUBMIT_LOCKS = Striped.lazyWeakLock(128);
+    /** 固定使用 Kubernetes 当前标准的 apps/v1 Deployment，避免旧客户端回退到 extensions API。 */
+    private static final ResourceDefinitionContext APPS_V1_DEPLOYMENT = new ResourceDefinitionContext.Builder()
+            .withGroup("apps")
+            .withVersion("v1")
+            .withPlural("deployments")
+            .withKind("Deployment")
+            .withNamespaced(true)
+            .build();
 
     /**
      * @return The type of the Kubernetes gateway, which is GatewayType.KUBERNETES_APPLICATION.
@@ -150,7 +160,7 @@ public class KubernetesApplicationGateway extends KubernetesGateway {
         Lock submitLock = SUBMIT_LOCKS.get(namespace + "/" + clusterId);
         submitLock.lock();
         try (KubernetesClient kubernetesClient = getK8sClientHelper().getKubernetesClient()) {
-            cleanupExistingApplication(kubernetesClient, namespace, clusterId);
+            tryCleanupExistingApplicationBeforeSubmit(kubernetesClient, namespace, clusterId);
             logger.info("Start submit k8s application.");
 
             ClusterClientProvider<String> clusterClient =
@@ -185,17 +195,38 @@ public class KubernetesApplicationGateway extends KubernetesGateway {
         }
     }
 
-    /** 二次提交前清理同名 Flink Application，避免旧资源和 Service 地址被新任务复用。 */
+    /**
+     * 提交前清理属于防止同名资源冲突的增强措施；检查权限不足或清理失败时记录完整异常，
+     * 但不能替代正式提交结果，更不能因此提前终止任务提交。
+     */
+    protected void tryCleanupExistingApplicationBeforeSubmit(
+            KubernetesClient kubernetesClient, String namespace, String clusterId) {
+        try {
+            cleanupExistingApplication(kubernetesClient, namespace, clusterId);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            logger.error(
+                    "Interrupted while checking or cleaning existing Kubernetes application {}/{}; continue submission",
+                    namespace,
+                    clusterId,
+                    e);
+        } catch (Exception e) {
+            logger.error(
+                    "Failed to check or clean existing Kubernetes application {}/{}; continue submission",
+                    namespace,
+                    clusterId,
+                    e);
+        }
+    }
+
+    /** 二次提交复用原有停止链路清理同名 Flink Application，避免预检查失败导致清理动作无法执行。 */
     protected void cleanupExistingApplication(KubernetesClient kubernetesClient, String namespace, String clusterId)
             throws InterruptedException {
-        if (!hasExistingApplicationResources(kubernetesClient, namespace, clusterId)) {
-            return;
-        }
-
         logger.warn(
-                "Kubernetes application {} already exists in namespace {}, delete it before resubmit",
+                "Try to clean Kubernetes application {} in namespace {} before resubmit",
                 clusterId,
                 namespace);
+        // 该 Flink 原生清理操作与已有停止功能使用同一链路，目标不存在时也可安全重复执行。
         getK8sClientHelper().getClient().stopAndCleanupCluster(clusterId);
 
         for (int retry = 0; retry < EXISTING_CLUSTER_DELETE_TIMEOUT_SECONDS; retry++) {
@@ -236,9 +267,9 @@ public class KubernetesApplicationGateway extends KubernetesGateway {
     /** Deployment 与内外部 Service 均消失后才能重建，避免残留资源影响新任务。 */
     protected boolean hasExistingApplicationResources(
             KubernetesClient kubernetesClient, String namespace, String clusterId) {
-        Deployment deployment = kubernetesClient
-                .apps()
-                .deployments()
+        // 显式声明 group/version，规避 Fabric8 旧版本通过资源模型推断时误用 extensions API。
+        GenericKubernetesResource deployment = kubernetesClient
+                .genericKubernetesResources(APPS_V1_DEPLOYMENT)
                 .inNamespace(namespace)
                 .withName(clusterId)
                 .get();
