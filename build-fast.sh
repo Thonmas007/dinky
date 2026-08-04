@@ -127,6 +127,7 @@ fi
 ./mvnw package \
   -Dmaven.clean.skip=true \
   -Dmaven.test.skip=true \
+  -Dmaven.resources.overwrite=true \
   -Dspotless.check.skip=true \
   -P "aliyun,prod,web,flink-${FLINK_VERSION},flink-single-version"
 
