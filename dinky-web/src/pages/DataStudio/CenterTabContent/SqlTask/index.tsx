@@ -967,9 +967,7 @@ export const SqlTask = memo((props: FlinkSqlProps & any) => {
             />
 
             <RunToolBarButton
-              isShow={
-                currentState.status === 'FAILED' && currentState.type === 'kubernetes-application'
-              }
+              isShow={currentState.type === 'kubernetes-application'}
               disabled={isLockTask || isSubmitting || currentState.step === JOB_LIFE_CYCLE.PUBLISH}
               showDesc={showDesc}
               color={'red'}
