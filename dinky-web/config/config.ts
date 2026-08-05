@@ -204,6 +204,10 @@ export default defineConfig({
       { languages: ['shell', 'json', 'java', 'sql', 'python', 'scala', 'yaml'] }
     ]);
 
+    // 限制生产压缩阶段的子进程数量，避免高并发启动 esbuild 时耗尽本机进程资源。
+    memo.optimization.minimizer('js-esbuild').tap(([options]) => [{ ...options, parallel: 2 }]);
+    memo.optimization.minimizer('css-esbuild').tap(([options]) => [{ ...options, parallel: 2 }]);
+
     return memo;
   }
 });

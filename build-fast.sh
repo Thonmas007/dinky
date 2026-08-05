@@ -26,8 +26,10 @@ set -euo pipefail
 #    适用于飞书告警等独立 lib 模块，更新速度明显快于完整发布模式。
 #    bash build-fast.sh module dinky-alert/dinky-alert-feishu dinky-alert-feishu-1.2.5.jar
 #
-# 两种模式更新运行目录后都会自动重启服务；只打包不重启时可设置 AUTO_RESTART=false。
+# 两种模式更新运行目录后都会自动重启服务；只编译并更新运行目录、不重启本地服务时执行：
 #    AUTO_RESTART=false bash build-fast.sh module dinky-alert/dinky-alert-feishu dinky-alert-feishu-1.2.5.jar
+# 完整构建但不重启本地服务：
+#    AUTO_RESTART=false /Users/liuningbo/workspace_ctl/dinky/build-fast.sh
 #
 # 兼容旧用法：直接传 Flink 版本时仍按完整发布模式执行。
 #    bash build-fast.sh 1.20

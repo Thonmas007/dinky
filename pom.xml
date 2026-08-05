@@ -147,6 +147,14 @@
                 <version>${kubernetes-client.version}</version>
             </dependency>
             <dependency>
+                <!-- 统一 AWS SDK 组件版本，避免 Hadoop 传递依赖中的旧类覆盖 Pod Identity 支持。 -->
+                <groupId>com.amazonaws</groupId>
+                <artifactId>aws-java-sdk-bom</artifactId>
+                <version>${aws-java-sdk-s3.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
                 <groupId>com.amazonaws</groupId>
                 <artifactId>aws-java-sdk-s3</artifactId>
                 <version>${aws-java-sdk-s3.version}</version>

@@ -14,4 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set -euo pipefail
+
+# 统一使用 JDK 11，确保 jdk11 Profile 生效并加载对应的 Maven 插件版本管理。
+JAVA_HOME="/Users/liuningbo/applications/java/jdk11/Contents/Home"
+PATH="${JAVA_HOME}/bin:${PATH}"
+export JAVA_HOME PATH
+
 ./mvnw clean package -Dmaven.test.skip=true -Dspotless.check.skip=true -P aliyun,prod,web,flink-1.20,flink-single-version
