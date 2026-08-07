@@ -32,11 +32,14 @@ import org.dinky.data.model.job.JobInstance;
 import org.dinky.data.result.ProTableResult;
 import org.dinky.data.result.Result;
 import org.dinky.data.vo.task.JobInstanceVo;
+import org.dinky.daemon.pool.FlinkJobThreadPool;
 import org.dinky.explainer.lineage.LineageResult;
 import org.dinky.service.JobInstanceService;
 import org.dinky.utils.BuildConfiguration;
 
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 
 import org.springframework.web.bind.annotation.GetMapping;
@@ -115,6 +118,18 @@ public class JobInstanceController {
             dataTypeClass = Integer.class)
     public Result<JobInstance> getJobInstanceByTaskId(@RequestParam("taskId") Integer taskId) {
         return Result.succeed(jobInstanceService.getJobInstanceByTaskId(taskId));
+    }
+
+    /**
+     * 获取当前监控线程池中的运行中任务 ID，保持与 TASK_RUN_INSTANCE WebSocket 的 RunningTaskId 字段一致。
+     *
+     * @return {@link Result}< {@link Map}< {@link String}, {@link Set}< {@link Integer}>>>
+     */
+    @GetMapping("/getRunningTaskIds")
+    @ApiOperation("Get running task ids")
+    public Result<Map<String, Set<Integer>>> getRunningTaskIds() {
+        Set<Integer> runningTaskIds = new HashSet<>(FlinkJobThreadPool.getInstance().getCurrentMonitorTaskIds());
+        return Result.succeed(Collections.singletonMap("RunningTaskId", runningTaskIds));
     }
 
     /**
