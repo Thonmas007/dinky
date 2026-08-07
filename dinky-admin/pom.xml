@@ -151,7 +151,8 @@
         <dependency>
             <groupId>mysql</groupId>
             <artifactId>mysql-connector-java</artifactId>
-            <scope>${scope.runtime}</scope>
+            <!-- 服务端启动时需要初始化 Druid 数据源，MySQL 驱动必须进入外置 lib，不能在 prod 包中降级为 provided。 -->
+            <scope>runtime</scope>
         </dependency>
         <dependency>
             <groupId>com.h2database</groupId>
