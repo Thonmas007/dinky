@@ -233,6 +233,8 @@ export default {
   'devops.jobinfo.config.submitType': 'Submit Mode',
   'devops.jobinfo.config.taskId': 'Dinky Job ID',
   'devops.jobinfo.config.useSqlFragment': 'Sql Fragment',
+  'devops.jobinfo.discover.jobid': 'Discover Job ID',
+  'devops.jobinfo.discover.jobid.success': 'The active Job ID was discovered and monitoring resumed',
   'devops.jobinfo.job.key': '{key} Job',
   'devops.jobinfo.job.key.success': '{key} Success',
   'devops.jobinfo.job.keyConfirm': '{key} this Job？',

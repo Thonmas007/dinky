@@ -24,14 +24,21 @@ import org.dinky.context.SpringContextUtils;
 import org.dinky.daemon.constant.FlinkTaskConstant;
 import org.dinky.daemon.task.DaemonTask;
 import org.dinky.daemon.task.DaemonTaskConfig;
+import org.dinky.data.enums.GatewayType;
+import org.dinky.data.enums.JobStatus;
+import org.dinky.data.enums.TaskMonitorScanStatus;
+import org.dinky.data.model.Task;
 import org.dinky.data.model.SystemConfiguration;
 import org.dinky.data.model.ext.JobInfoDetail;
+import org.dinky.data.model.job.JobInstance;
 import org.dinky.job.handler.JobAlertHandler;
 import org.dinky.job.handler.JobMetricsHandler;
 import org.dinky.job.handler.JobRefreshHandler;
 import org.dinky.service.JobInstanceService;
 import org.dinky.service.MonitorService;
+import org.dinky.service.TaskService;
 
+import java.time.LocalDateTime;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -46,6 +53,9 @@ import lombok.extern.slf4j.Slf4j;
 @Data
 public class FlinkJobTask implements DaemonTask {
 
+    private static final int MONITOR_SCAN_MAX_RETRY = 3;
+    private static final long MONITOR_SCAN_RETRY_INTERVAL_MS = 30_000L;
+
     private DaemonTaskConfig config;
 
     public static final String TYPE = FlinkJobTask.class.toString();
@@ -54,15 +64,22 @@ public class FlinkJobTask implements DaemonTask {
 
     private static final MonitorService monitorService;
 
+    private static final TaskService taskService;
+
     private long preDealTime;
 
     private long refreshCount = 0;
+
+    private int monitorScanRetryCount = 0;
+
+    private long lastMonitorScanTime = 0L;
 
     private Map<String, Map<String, String>> verticesAndMetricsMap = new ConcurrentHashMap<>();
 
     static {
         jobInstanceService = SpringContextUtils.getBean("jobInstanceServiceImpl", JobInstanceService.class);
         monitorService = SpringContextUtils.getBean("monitorServiceImpl", MonitorService.class);
+        taskService = SpringContextUtils.getBean("taskServiceImpl", TaskService.class);
     }
 
     private JobInfoDetail jobInfoDetail;
@@ -100,8 +117,22 @@ public class FlinkJobTask implements DaemonTask {
     @Override
     public boolean dealTask() {
         volatilityBalance();
+        if (isWaitingForMonitorScanRetry()) {
+            return false;
+        }
 
         boolean isDone = JobRefreshHandler.refreshJob(jobInfoDetail, isNeedSave());
+        if (shouldRetryMonitorScan(isDone)) {
+            if (isMonitorScanActive() && tryDiscoverJobId()) {
+                return false;
+            }
+            isDone = handleMonitorScanRetry();
+            if (!isDone) {
+                return false;
+            }
+        } else {
+            handleMonitorScanRecovered();
+        }
         if (Asserts.isAllNotNull(jobInfoDetail.getClusterInstance())) {
             JobAlertHandler.getInstance().check(jobInfoDetail);
             if (SystemConfiguration.getInstances().getMetricsSysEnable().getValue()) {
@@ -130,6 +161,133 @@ public class FlinkJobTask implements DaemonTask {
             }
         }
         preDealTime = System.currentTimeMillis();
+    }
+
+    /** Karpenter 驱逐后 Flink/TaskManager 可能短暂不可查，进入重扫窗口时先等待 30 秒再触发下一次扫描。 */
+    private boolean isWaitingForMonitorScanRetry() {
+        return isMonitorScanActive()
+                && System.currentTimeMillis() - lastMonitorScanTime < MONITOR_SCAN_RETRY_INTERVAL_MS;
+    }
+
+    /** 仅对 Kubernetes Application 的监控不可达状态做重扫，避免影响 Flink 已明确返回的真实终态。 */
+    private boolean shouldRetryMonitorScan(boolean isDone) {
+        if (!isKubernetesApplicationJob()) {
+            return false;
+        }
+        String status = jobInfoDetail.getInstance().getStatus();
+        return JobStatus.RECONNECTING.getValue().equals(status)
+                || (isDone && JobStatus.UNKNOWN.getValue().equals(status));
+    }
+
+    /** 监控失败先保留实例关联，按 30 秒间隔最多重扫三次，全部失败后才停止监控并标记任务扫描失败。 */
+    private boolean handleMonitorScanRetry() {
+        if (!isMonitorScanActive()) {
+            markTaskMonitorScanStatus(TaskMonitorScanStatus.SCANNING);
+            keepJobReconnecting();
+            lastMonitorScanTime = System.currentTimeMillis();
+            log.warn(
+                    "Kubernetes application job monitor failed, start rescan task {} job instance {}",
+                    jobInfoDetail.getInstance().getTaskId(),
+                    jobInfoDetail.getInstance().getId());
+            return false;
+        }
+
+        monitorScanRetryCount++;
+        if (monitorScanRetryCount >= MONITOR_SCAN_MAX_RETRY) {
+            markTaskMonitorScanStatus(TaskMonitorScanStatus.FAILED);
+            log.warn(
+                    "Kubernetes application job monitor rescan failed after {} retries, task {} job instance {}",
+                    MONITOR_SCAN_MAX_RETRY,
+                    jobInfoDetail.getInstance().getTaskId(),
+                    jobInfoDetail.getInstance().getId());
+            resetMonitorScanRetry();
+            return true;
+        }
+
+        keepJobReconnecting();
+        lastMonitorScanTime = System.currentTimeMillis();
+        log.warn(
+                "Kubernetes application job monitor rescan failed, will retry {}/{} later, task {} job instance {}",
+                monitorScanRetryCount,
+                MONITOR_SCAN_MAX_RETRY,
+                jobInfoDetail.getInstance().getTaskId(),
+                jobInfoDetail.getInstance().getId());
+        return false;
+    }
+
+    /** 每轮延迟重扫额外查询 overview；JobManager 重建产生新 JID 时立即替换内存详情并继续监控。 */
+    private boolean tryDiscoverJobId() {
+        String oldJobId = jobInfoDetail.getInstance().getJid();
+        try {
+            JobInfoDetail discoveredJob =
+                    jobInstanceService.discoverJobId(jobInfoDetail.getInstance().getId());
+            if (discoveredJob == null) {
+                return false;
+            }
+            jobInfoDetail = discoveredJob;
+            log.info(
+                    "Kubernetes application job monitor discovered Job ID, task {} instance {}: {} -> {}",
+                    jobInfoDetail.getInstance().getTaskId(),
+                    jobInfoDetail.getInstance().getId(),
+                    oldJobId,
+                    jobInfoDetail.getInstance().getJid());
+            resetMonitorScanRetry();
+            return true;
+        } catch (Exception e) {
+            log.warn(
+                    "Discover Kubernetes application Job ID failed for instance {}: {}",
+                    jobInfoDetail.getInstance().getId(),
+                    e.toString());
+            return false;
+        }
+    }
+
+    /** 重扫期间一旦重新查到 Flink 作业，就恢复任务关联状态并继续原有监控流程。 */
+    private void handleMonitorScanRecovered() {
+        if (!isMonitorScanActive()) {
+            return;
+        }
+        markTaskMonitorScanStatus(TaskMonitorScanStatus.SUCCESS);
+        log.info(
+                "Kubernetes application job monitor rescan recovered, task {} job instance {}",
+                jobInfoDetail.getInstance().getTaskId(),
+                jobInfoDetail.getInstance().getId());
+        resetMonitorScanRetry();
+    }
+
+    private boolean isKubernetesApplicationJob() {
+        return Asserts.isNotNull(jobInfoDetail.getClusterInstance())
+                && GatewayType.get(jobInfoDetail.getClusterInstance().getType()).isKubernetesApplicationMode();
+    }
+
+    private boolean isMonitorScanActive() {
+        return lastMonitorScanTime > 0;
+    }
+
+    private void resetMonitorScanRetry() {
+        monitorScanRetryCount = 0;
+        lastMonitorScanTime = 0L;
+    }
+
+    private void keepJobReconnecting() {
+        jobInfoDetail.getInstance().setStatus(JobStatus.RECONNECTING.getValue());
+        jobInfoDetail.getInstance().setFinishTime(LocalDateTime.now());
+        // 只持久化重连字段，避免后台持有的旧详情把人工发现后更新的新 JID 覆盖回去。
+        JobInstance reconnectingInstance = new JobInstance();
+        reconnectingInstance.setId(jobInfoDetail.getInstance().getId());
+        reconnectingInstance.setStatus(JobStatus.RECONNECTING.getValue());
+        reconnectingInstance.setFinishTime(jobInfoDetail.getInstance().getFinishTime());
+        jobInstanceService.updateById(reconnectingInstance);
+    }
+
+    private void markTaskMonitorScanStatus(TaskMonitorScanStatus status) {
+        Task task = new Task();
+        task.setId(jobInfoDetail.getInstance().getTaskId());
+        task.setMonitorScanStatus(status.getValue());
+        if (TaskMonitorScanStatus.SCANNING == status || TaskMonitorScanStatus.SUCCESS == status) {
+            task.setJobInstanceId(jobInfoDetail.getInstance().getId());
+        }
+        taskService.updateById(task);
     }
 
     /**

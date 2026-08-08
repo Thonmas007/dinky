@@ -190,6 +190,30 @@ public class JobInstanceController {
     }
 
     /**
+     * Kubernetes Application 重建后主动发现新的 Flink Job ID，并重新启动该实例的后台监控。
+     */
+    @GetMapping("/discoverJobId")
+    @ApiOperation("Discover and relink Flink Job ID")
+    @Log(title = "Discover and relink Flink Job ID", businessType = BusinessType.UPDATE)
+    @ApiImplicitParam(
+            name = "id",
+            value = "Job instance id",
+            dataType = "Integer",
+            paramType = "query",
+            required = true)
+    public Result<JobInfoDetail> discoverJobId(@RequestParam Integer id) {
+        JobInfoDetail discoveredJob = jobInstanceService.discoverJobId(id);
+        if (discoveredJob == null) {
+            return Result.failed("未发现同名且处于运行态的 Flink 作业，请确认 JobManager REST 地址和作业状态");
+        }
+
+        JobInstance jobInstance = discoveredJob.getInstance();
+        JobInfoDetail refreshedJob =
+                jobInstanceService.refreshJobInfoDetail(id, jobInstance.getTaskId(), true);
+        return Result.succeed(refreshedJob, "已发现 Job ID " + jobInstance.getJid() + " 并恢复监控");
+    }
+
+    /**
      * 获取单任务实例的血缘分析
      */
     @GetMapping("/getLineage")

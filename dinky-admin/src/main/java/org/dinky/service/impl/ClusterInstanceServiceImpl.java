@@ -295,6 +295,14 @@ public class ClusterInstanceServiceImpl extends SuperServiceImpl<ClusterInstance
     private boolean checkHealth(ClusterInstance clusterInstance) {
         FlinkClusterInfo info = checkHeartBeat(clusterInstance.getHosts(), clusterInstance.getJobManagerHost());
         if (!info.isEffective()) {
+            if (shouldKeepKubernetesApplicationAddress(clusterInstance)) {
+                // Kubernetes Application 的 REST 可能因 ClusterIP、DNS 或网络策略暂时不可达，保留地址供主动轮询和后续恢复使用。
+                if (Asserts.isNullString(clusterInstance.getJobManagerHost())) {
+                    clusterInstance.setJobManagerHost(clusterInstance.getHosts());
+                }
+                clusterInstance.setStatus(0);
+                return false;
+            }
             clusterInstance.setJobManagerHost("");
             clusterInstance.setStatus(0);
             return false;
@@ -304,5 +312,12 @@ public class ClusterInstanceServiceImpl extends SuperServiceImpl<ClusterInstance
             clusterInstance.setVersion(info.getVersion());
             return true;
         }
+    }
+
+    /** 自动注册的 Kubernetes Application 需要保留 REST 地址，否则一次探活失败会让作业监控丢失连接上下文。 */
+    private boolean shouldKeepKubernetesApplicationAddress(ClusterInstance clusterInstance) {
+        return clusterInstance.isAutoRegisters()
+                && GatewayType.get(clusterInstance.getType()).isKubernetesApplicationMode()
+                && Asserts.isNotNullString(clusterInstance.getHosts());
     }
 }

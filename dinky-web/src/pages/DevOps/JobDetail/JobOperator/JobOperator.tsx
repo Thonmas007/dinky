@@ -21,11 +21,13 @@ import { cancelTask, savePointTask } from '@/pages/DataStudio/service';
 import { isStatusDone } from '@/pages/DevOps/function';
 import EditJobInstanceForm from '@/pages/DevOps/JobDetail/JobOperator/components/EditJobInstanceForm';
 import RestartForm from '@/pages/DevOps/JobDetail/JobOperator/components/RestartForm';
+import { discoverJobId } from '@/pages/DevOps/JobDetail/srvice';
 import { API_CONSTANTS } from '@/services/endpoints';
 import { Jobs } from '@/types/DevOps/data';
 import { l } from '@/utils/intl';
-import { EllipsisOutlined, RedoOutlined } from '@ant-design/icons';
+import { EllipsisOutlined, RedoOutlined, SearchOutlined } from '@ant-design/icons';
 import { Button, Dropdown, message, Modal, Space } from 'antd';
+import { useState } from 'react';
 
 const operatorType = {
   CANCEL_JOB: 'canceljob',
@@ -40,7 +42,15 @@ export type OperatorType = {
 };
 const JobOperator = (props: OperatorType) => {
   const { jobDetail, refesh } = props;
+  const [discovering, setDiscovering] = useState(false);
   const jobManagerHost = jobDetail?.clusterInstance?.jobManagerHost;
+  const clusterType = jobDetail?.clusterInstance?.type;
+  const canDiscoverJobId = [
+    'ka',
+    'kao',
+    'kubernetes-application',
+    'kubernetes-application-operator'
+  ].includes(clusterType as string);
   const webUri =
     jobManagerHost?.startsWith('http://') || jobManagerHost?.startsWith('https://')
       ? jobManagerHost
@@ -69,10 +79,37 @@ const JobOperator = (props: OperatorType) => {
     });
   };
 
+  /** 人工恢复入口会重新关联新 JID；请求完成后立即刷新详情，避免等待下一次三秒轮询。 */
+  const handleDiscoverJobId = async () => {
+    const jobInstanceId = jobDetail?.instance?.id;
+    if (!jobInstanceId) {
+      return;
+    }
+    setDiscovering(true);
+    try {
+      await discoverJobId(jobInstanceId);
+      message.success(l('devops.jobinfo.discover.jobid.success'));
+      refesh(false);
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
   return (
     <Space>
       <EditJobInstanceForm jobDetail={jobDetail} refeshJob={refesh} />
       <Button icon={<RedoOutlined />} onClick={() => refesh(true)} />
+
+      {canDiscoverJobId && (
+        <Button
+          key='discover-job-id'
+          icon={<SearchOutlined />}
+          loading={discovering}
+          onClick={handleDiscoverJobId}
+        >
+          {l('devops.jobinfo.discover.jobid')}
+        </Button>
+      )}
 
       <Button key='flinkwebui' href={webUri} target={'_blank'}>
         FlinkWebUI

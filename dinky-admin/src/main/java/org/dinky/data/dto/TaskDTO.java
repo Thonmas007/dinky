@@ -151,6 +151,13 @@ public class TaskDTO extends AbstractStatementDTO {
     private String status;
 
     @ApiModelProperty(
+            value = "Monitor Scan Status",
+            dataType = "String",
+            example = "SCANNING",
+            notes = "Kubernetes 监控重扫状态：NONE 未触发，SCANNING 扫描中，SUCCESS 已恢复，FAILED 扫描失败")
+    private String monitorScanStatus;
+
+    @ApiModelProperty(
             value = "Version ID",
             dataType = "Integer",
             example = "9001",

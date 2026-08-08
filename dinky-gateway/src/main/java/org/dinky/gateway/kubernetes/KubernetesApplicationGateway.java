@@ -375,12 +375,14 @@ public class KubernetesApplicationGateway extends KubernetesGateway {
                     // 避免作业实际已运行但 Dinky 因 listJobs Future 超时而将提交误判为失败。
                     String webUrl = client.getWebInterfaceURL();
                     String queryUrl = resolveRestQueryUrl(kubernetesClient, deployment, webUrl);
+                    String accessibleWebUrl = queryUrl;
                     logger.info("Start get Kubernetes application job overview from {}", queryUrl);
                     JobDetails jobDetails = invokeJobsOverviewApi(queryUrl);
                     // ClusterIP 可能对集群外部署的 Dinky 不可达，失败时回退到 Flink 提供的 NodePort/外部地址。
                     if (Objects.isNull(jobDetails) && !StringUtils.equals(queryUrl, webUrl)) {
                         logger.warn("Get job overview from {} failed, fallback to {}", queryUrl, webUrl);
                         jobDetails = invokeJobsOverviewApi(webUrl);
+                        accessibleWebUrl = webUrl;
                     }
                     if (Objects.isNull(jobDetails) || CollectionUtils.isEmpty(jobDetails.getJobs())) {
                         logger.info("Kubernetes application job is not ready, will retry later");
@@ -391,7 +393,8 @@ public class KubernetesApplicationGateway extends KubernetesGateway {
                     // To create a cluster ID, you need to combine the cluster ID with the jobID to ensure uniqueness
                     String cid = configuration.getString(KubernetesConfigOptions.CLUSTER_ID) + job.getJid();
                     logger.info("Success get Kubernetes application job status: {}", job.getState());
-                    return result.setWebURL(webUrl)
+                    // 监控复用本轮已验证可访问的 REST 地址，避免 ClusterIP 模式保存 DNS 后被探活清空。
+                    return result.setWebURL(accessibleWebUrl)
                             .setJids(Collections.singletonList(job.getJid()))
                             .setId(cid);
                 } catch (GatewayException e) {

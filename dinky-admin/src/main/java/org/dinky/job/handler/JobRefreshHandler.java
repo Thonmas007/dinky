@@ -266,6 +266,12 @@ public class JobRefreshHandler {
                             .getValue();
         }
         JobDataDto.JobDataDtoBuilder builder = JobDataDto.builder();
+        if (Asserts.isNullString(jobManagerHost)) {
+            // 地址为空时直接交给上层重连/主动轮询分支，避免 Flink REST 客户端构造出无意义请求。
+            String errorMsg = "JobManager REST address is empty, skip this refresh.";
+            log.warn(errorMsg);
+            return builder.id(id).error(true).errorMsg(errorMsg).build();
+        }
         FlinkAPI api = FlinkAPI.build(jobManagerHost);
         try {
             JsonNode jobInfo = FlinkAPI.build(jobManagerHost).getJobInfo(jobId);
@@ -312,8 +318,9 @@ public class JobRefreshHandler {
                     .config(jobConfigInfo)
                     .build();
         } catch (Exception e) {
-            log.warn("Connect {} failed,{}", jobManagerHost, e.getMessage());
-            return builder.id(id).error(true).errorMsg(e.getMessage()).build();
+            String errorMsg = Asserts.isNotNullString(e.getMessage()) ? e.getMessage() : e.getClass().getSimpleName();
+            log.warn("Connect {} failed,{}", jobManagerHost, errorMsg);
+            return builder.id(id).error(true).errorMsg(errorMsg).build();
         }
     }
 

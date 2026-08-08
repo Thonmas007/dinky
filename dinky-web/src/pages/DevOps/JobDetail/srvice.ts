@@ -25,6 +25,11 @@ export const refreshJobInstance = (id: string, isForce?: boolean) => {
   return getData(API_CONSTANTS.REFRESH_JOB_DETAIL, { id, isForce });
 };
 
+/** Kubernetes Application 重建后，主动发现新的 Flink Job ID 并恢复后台监控。 */
+export const discoverJobId = (id: number) => {
+  return getData(API_CONSTANTS.DISCOVER_JOB_ID, { id });
+};
+
 export async function getMetricsLayout(layoutName: string) {
   return getData(API_CONSTANTS.METRICS_LAYOUT_GET_BY_NAME, { layoutName: layoutName });
 }

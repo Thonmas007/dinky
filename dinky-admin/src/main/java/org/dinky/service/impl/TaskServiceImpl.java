@@ -39,6 +39,7 @@ import org.dinky.data.enums.JobLifeCycle;
 import org.dinky.data.enums.JobStatus;
 import org.dinky.data.enums.ProcessStepType;
 import org.dinky.data.enums.Status;
+import org.dinky.data.enums.TaskMonitorScanStatus;
 import org.dinky.data.enums.TaskOwnerLockStrategyEnum;
 import org.dinky.data.exception.BusException;
 import org.dinky.data.exception.NotSupportExplainExcepition;
@@ -346,6 +347,7 @@ public class TaskServiceImpl extends SuperServiceImpl<TaskMapper, Task> implemen
         }
         log.info("Job Submit success");
         Task task = new Task(submitDto.getId(), jobResult.getJobInstanceId());
+        task.setMonitorScanStatus(TaskMonitorScanStatus.NONE.getValue());
         if (!this.updateById(task)) {
             throw new BusException(Status.TASK_UPDATE_FAILED.getMessage());
         }

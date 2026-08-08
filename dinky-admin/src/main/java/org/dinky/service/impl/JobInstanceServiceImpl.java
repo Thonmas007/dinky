@@ -19,6 +19,7 @@
 
 package org.dinky.service.impl;
 
+import org.dinky.api.FlinkAPI;
 import org.dinky.assertion.Asserts;
 import org.dinky.context.TenantContextHolder;
 import org.dinky.daemon.pool.FlinkJobThreadPool;
@@ -26,10 +27,13 @@ import org.dinky.daemon.task.DaemonTask;
 import org.dinky.daemon.task.DaemonTaskConfig;
 import org.dinky.data.dto.ClusterConfigurationDTO;
 import org.dinky.data.dto.JobDataDto;
+import org.dinky.data.enums.GatewayType;
 import org.dinky.data.enums.JobStatus;
 import org.dinky.data.enums.Status;
+import org.dinky.data.enums.TaskMonitorScanStatus;
 import org.dinky.data.model.ClusterConfiguration;
 import org.dinky.data.model.ClusterInstance;
+import org.dinky.data.model.Task;
 import org.dinky.data.model.ext.JobInfoDetail;
 import org.dinky.data.model.home.JobInstanceCount;
 import org.dinky.data.model.home.JobInstanceStatus;
@@ -45,6 +49,7 @@ import org.dinky.explainer.lineage.LineageBuilder;
 import org.dinky.explainer.lineage.LineageResult;
 import org.dinky.job.FlinkJobTask;
 import org.dinky.mapper.JobInstanceMapper;
+import org.dinky.mapper.TaskMapper;
 import org.dinky.mybatis.service.impl.SuperServiceImpl;
 import org.dinky.mybatis.util.ProTableUtil;
 import org.dinky.service.ClusterConfigurationService;
@@ -53,12 +58,19 @@ import org.dinky.service.HistoryService;
 import org.dinky.service.JobHistoryService;
 import org.dinky.service.JobInstanceService;
 
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
@@ -80,10 +92,18 @@ import lombok.extern.slf4j.Slf4j;
 public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, JobInstance>
         implements JobInstanceService {
 
+    private static final Set<JobStatus> DISCOVERABLE_JOB_STATUSES = Collections.unmodifiableSet(EnumSet.of(
+            JobStatus.INITIALIZING,
+            JobStatus.CREATED,
+            JobStatus.RUNNING,
+            JobStatus.RESTARTING,
+            JobStatus.RECONCILING));
+
     private final HistoryService historyService;
     private final ClusterInstanceService clusterInstanceService;
     private final ClusterConfigurationService clusterConfigurationService;
     private final JobHistoryService jobHistoryService;
+    private final TaskMapper taskMapper;
 
     @Override
     public JobInstance getByIdWithoutTenant(Integer id) {
@@ -219,6 +239,112 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
         } else {
             return getJobInfoDetail(jobInstanceId);
         }
+    }
+
+    /**
+     * 节点驱逐可能让同一个 Kubernetes Application 以新 JID 恢复；这里从 overview 中选择最新活跃作业，
+     * 并以条件更新保证后台扫描和人工点击并发执行时不会互相覆盖已经恢复的关联。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public JobInfoDetail discoverJobId(Integer jobInstanceId) {
+        JobInfoDetail jobInfoDetail = getJobInfoDetail(jobInstanceId);
+        JobInstance jobInstance = jobInfoDetail.getInstance();
+        ClusterInstance clusterInstance = jobInfoDetail.getClusterInstance();
+        if (clusterInstance == null
+                || !GatewayType.get(clusterInstance.getType()).isKubernetesApplicationMode()) {
+            log.warn("Job ID discovery only supports Kubernetes Application, job instance {}", jobInstanceId);
+            return null;
+        }
+
+        String jobManagerHost = clusterInstance.getJobManagerHost();
+        if (StrUtil.isBlank(jobManagerHost)) {
+            log.warn("JobManager REST address is empty, cannot discover Job ID for instance {}", jobInstanceId);
+            return null;
+        }
+
+        List<JsonNode> flinkJobs;
+        try {
+            flinkJobs = FlinkAPI.build(jobManagerHost).listJobs();
+        } catch (Exception e) {
+            // REST 暂不可达时保留旧关联，等待下一轮扫描，不能把网络故障误判成没有运行中的作业。
+            log.warn(
+                    "Query Flink job overview from {} failed for instance {}: {}",
+                    jobManagerHost,
+                    jobInstanceId,
+                    e.toString());
+            return null;
+        }
+        Optional<JsonNode> activeJob = findLatestActiveJob(flinkJobs, jobInstance.getName());
+        if (!activeJob.isPresent()) {
+            log.warn(
+                    "No active Flink job named {} was found from {}, job instance {}",
+                    jobInstance.getName(),
+                    jobManagerHost,
+                    jobInstanceId);
+            return null;
+        }
+
+        JsonNode flinkJob = activeJob.get();
+        String oldJobId = jobInstance.getJid();
+        String newJobId = flinkJob.path("jid").asText();
+        String newStatus = flinkJob.path("state").asText();
+
+        LambdaUpdateWrapper<JobInstance> updateWrapper = new LambdaUpdateWrapper<JobInstance>()
+                .eq(JobInstance::getId, jobInstanceId)
+                .set(JobInstance::getJid, newJobId)
+                .set(JobInstance::getStatus, newStatus)
+                .set(JobInstance::getFinishTime, null)
+                .set(JobInstance::getError, null);
+        // 并发发现只允许旧 JID 或同一个新 JID 写入，避免迟到的扫描覆盖另一轮已经建立的新关联。
+        updateWrapper.and(wrapper -> {
+            if (StrUtil.isBlank(oldJobId)) {
+                wrapper.isNull(JobInstance::getJid)
+                        .or()
+                        .eq(JobInstance::getJid, "")
+                        .or()
+                        .eq(JobInstance::getJid, newJobId);
+            } else {
+                wrapper.eq(JobInstance::getJid, oldJobId).or().eq(JobInstance::getJid, newJobId);
+            }
+        });
+        int updatedRows = baseMapper.update(null, updateWrapper);
+        if (updatedRows == 0) {
+            JobInstance latestInstance = getById(jobInstanceId);
+            if (latestInstance == null || !StrUtil.equals(newJobId, latestInstance.getJid())) {
+                log.warn(
+                        "Job ID discovery result {} was superseded for job instance {}",
+                        newJobId,
+                        jobInstanceId);
+                return null;
+            }
+        }
+
+        Task task = new Task();
+        task.setId(jobInstance.getTaskId());
+        task.setJobInstanceId(jobInstanceId);
+        task.setMonitorScanStatus(TaskMonitorScanStatus.SUCCESS.getValue());
+        taskMapper.updateById(task);
+        log.info(
+                "Discovered and relinked Flink Job ID for instance {}: {} -> {}, status {}",
+                jobInstanceId,
+                oldJobId,
+                newJobId,
+                newStatus);
+        return getJobInfoDetail(jobInstanceId);
+    }
+
+    /** 同名作业可能残留多个历史记录，只允许选择最新的可恢复运行态，避免关联到已结束的旧作业。 */
+    static Optional<JsonNode> findLatestActiveJob(List<JsonNode> jobs, String jobName) {
+        if (jobs == null || StrUtil.isBlank(jobName)) {
+            return Optional.empty();
+        }
+        return jobs.stream()
+                .filter(Objects::nonNull)
+                .filter(job -> StrUtil.equals(jobName, job.path("name").asText()))
+                .filter(job -> DISCOVERABLE_JOB_STATUSES.contains(JobStatus.get(job.path("state").asText())))
+                .filter(job -> StrUtil.isNotBlank(job.path("jid").asText()))
+                .max(Comparator.comparingLong((JsonNode job) -> job.path("start-time").asLong(0L)));
     }
 
     @Override

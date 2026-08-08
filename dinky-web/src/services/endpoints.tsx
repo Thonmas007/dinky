@@ -203,6 +203,7 @@ export enum API_CONSTANTS {
   GET_LATEST_HISTORY_BY_ID = '/api/history/getLatestHistoryById',
   GET_JOB_DETAIL = '/api/jobInstance/getJobInfoDetail',
   REFRESH_JOB_DETAIL = '/api/jobInstance/refreshJobInfoDetail',
+  DISCOVER_JOB_ID = '/api/jobInstance/discoverJobId',
   GET_JOBMANAGER_LOG = '/api/jobInstance/getJobManagerLog',
   GET_JOBMANAGER_STDOUT = '/api/jobInstance/getJobManagerStdOut',
   GET_JOBMANAGER_THREAD_DUMP = '/api/jobInstance/getJobManagerThreadDump',

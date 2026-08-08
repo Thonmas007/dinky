@@ -86,6 +86,14 @@ public interface JobInstanceService extends ISuperService<JobInstance> {
     JobInfoDetail refreshJobInfoDetail(Integer jobInstanceId, Integer taskId, boolean isForce);
 
     /**
+     * Kubernetes Application 的 JobManager 重建后，按作业名发现当前活跃 Job ID 并恢复实例关联。
+     *
+     * @param jobInstanceId 需要恢复关联的作业实例 ID
+     * @return 发现成功后的作业详情；未发现可关联作业时返回 null
+     */
+    JobInfoDetail discoverJobId(Integer jobInstanceId);
+
+    /**
      * Hook the job done for the given job ID and task ID.
      *
      * @param jobId The ID of the job to hook the job done for.
