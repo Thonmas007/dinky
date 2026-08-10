@@ -626,13 +626,9 @@ public class TaskServiceImpl extends SuperServiceImpl<TaskMapper, Task> implemen
             JobInstance jobInstance = jobInstanceService.getById(task.getJobInstanceId());
             if (Asserts.isNotNull(jobInstance)) {
                 jobInstance.setStep(lifeCycle.getValue());
-                boolean updatedJobInstance = jobInstanceService.updateById(jobInstance);
-                if (updatedJobInstance)
-                    jobInstanceService.refreshJobInfoDetail(jobInstance.getId(), jobInstance.getTaskId(), true);
-                log.warn(
-                        "JobInstance [{}] step change to [{}] ,Trigger Force Refresh",
-                        jobInstance.getName(),
-                        lifeCycle.name());
+                jobInstanceService.updateById(jobInstance);
+                // 上下线只改变发布生命周期；强制刷新会重新探测并加入监控队列，导致未执行的任务被前端误判为运行中。
+                log.info("JobInstance [{}] step changed to [{}]", jobInstance.getName(), lifeCycle.name());
             }
         }
         return saved;
