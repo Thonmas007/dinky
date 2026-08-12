@@ -17,7 +17,7 @@
 
 spring:
   datasource:
-    url: jdbc:mysql://${MYSQL_ADDR:127.0.0.1:3306}/${MYSQL_DATABASE:dinky}?useUnicode=true&characterEncoding=UTF-8&autoReconnect=true&useSSL=false&zeroDateTimeBehavior=convertToNull&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
-    username: ${MYSQL_USERNAME:dinky}
-    password: ${MYSQL_PASSWORD:dinky}
+    url: jdbc:mysql://${MYSQL_ADDR:dev-web.cluster-cyjioww8quju.us-east-1.rds.amazonaws.com:3306}/${MYSQL_DATABASE:dinky}?useUnicode=true&characterEncoding=UTF-8&autoReconnect=true&useSSL=false&zeroDateTimeBehavior=convertToNull&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: ${MYSQL_USERNAME:mysql_admin}
+    password: ${MYSQL_PASSWORD:7FinOCrircD4JNTefN6O}
     driver-class-name: com.mysql.cj.jdbc.Driver

@@ -33,6 +33,7 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 import org.springframework.web.servlet.i18n.CookieLocaleResolver;
 
 import cn.dev33.satoken.exception.StopMatchException;
+import cn.dev33.satoken.context.SaHolder;
 import cn.dev33.satoken.interceptor.SaInterceptor;
 import cn.dev33.satoken.router.SaRouter;
 import cn.dev33.satoken.stp.StpUtil;
@@ -75,6 +76,10 @@ public class AppConfig implements WebMvcConfigurer {
         registry.addInterceptor(localeChangeInterceptor());
         // 注册Sa-Token的路由拦截器
         registry.addInterceptor(new SaInterceptor(handler -> {
+                    // Flink WebUI 的动态目标地址会影响 Spring 路径排除匹配，因此在鉴权入口再次按 URI 前缀兜底放行。
+                    if (SaHolder.getRequest().getRequestPath().startsWith("/api/flink/")) {
+                        return;
+                    }
                     SaRouter.match("/openapi/**", r -> {
                         if (!StpUtil.isLogin()) {
                             StpUtil.switchTo(BaseConstant.ADMIN_ID);
@@ -91,11 +96,17 @@ public class AppConfig implements WebMvcConfigurer {
                         "/api/sysConfig/setInitConfig",
                         "/download/**",
                         "/druid/**",
+                        // Flink WebUI 代理由控制器限制为只读请求，不依赖 Dinky 登录和租户上下文。
+                        "/api/flink/**",
                         "/api/version");
 
         registry.addInterceptor(new TenantInterceptor())
                 .addPathPatterns("/api/**")
-                .excludePathPatterns("/api/login", "/api/sysConfig/getNeededCfg", "/api/sysConfig/setInitConfig")
+                .excludePathPatterns(
+                        "/api/login",
+                        "/api/sysConfig/getNeededCfg",
+                        "/api/sysConfig/setInitConfig",
+                        "/api/flink/**")
                 .addPathPatterns("/api/alertGroup/**")
                 .addPathPatterns("/api/alertHistory/**")
                 .addPathPatterns("/api/alertInstance/**")

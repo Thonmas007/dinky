@@ -45,6 +45,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import org.springframework.context.annotation.DependsOn;
 
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 
@@ -53,8 +55,8 @@ import lombok.extern.slf4j.Slf4j;
 @Data
 public class FlinkJobTask implements DaemonTask {
 
-    // 节点拉起、镜像下载和 Flink 状态恢复可能持续数分钟，保留约 10 分钟自动发现窗口。
-    private static final int MONITOR_SCAN_MAX_RETRY = 20;
+    // 节点拉起、镜像下载和 Flink 状态恢复可能持续数分钟，保留 10 次自动发现机会。
+    private static final int MONITOR_SCAN_MAX_RETRY = 10;
     private static final long MONITOR_SCAN_RETRY_INTERVAL_MS = 30_000L;
 
     private DaemonTaskConfig config;
@@ -180,7 +182,7 @@ public class FlinkJobTask implements DaemonTask {
                 || (isDone && JobStatus.UNKNOWN.getValue().equals(status));
     }
 
-    /** 监控失败先保留实例关联，按 30 秒间隔持续重扫约 10 分钟，全部失败后才停止监控并标记任务扫描失败。 */
+    /** 监控失败先保留实例关联，按 30 秒基础间隔最多重扫 10 次，全部失败后才停止监控并标记任务扫描失败。 */
     private boolean handleMonitorScanRetry() {
         if (!isMonitorScanActive()) {
             markTaskMonitorScanStatus(TaskMonitorScanStatus.SCANNING);
@@ -195,12 +197,20 @@ public class FlinkJobTask implements DaemonTask {
 
         monitorScanRetryCount++;
         if (monitorScanRetryCount >= MONITOR_SCAN_MAX_RETRY) {
-            markTaskMonitorScanStatus(TaskMonitorScanStatus.FAILED);
-            log.warn(
-                    "Kubernetes application job monitor rescan failed after {} retries, task {} job instance {}",
-                    MONITOR_SCAN_MAX_RETRY,
-                    jobInfoDetail.getInstance().getTaskId(),
-                    jobInfoDetail.getInstance().getId());
+            if (markJobUnknownAfterMonitorScanExhausted()) {
+                markTaskMonitorScanStatus(TaskMonitorScanStatus.FAILED);
+                log.warn(
+                        "Kubernetes application job monitor rescan failed after {} retries; marked job UNKNOWN, task {} job instance {}",
+                        MONITOR_SCAN_MAX_RETRY,
+                        jobInfoDetail.getInstance().getTaskId(),
+                        jobInfoDetail.getInstance().getId());
+            } else {
+                // 最后一轮扫描可能与人工发现并发；状态已恢复时不能被迟到的失败结果覆盖。
+                log.info(
+                        "Kubernetes application job monitor rescan result was superseded, task {} job instance {}",
+                        jobInfoDetail.getInstance().getTaskId(),
+                        jobInfoDetail.getInstance().getId());
+            }
             resetMonitorScanRetry();
             return true;
         }
@@ -214,6 +224,27 @@ public class FlinkJobTask implements DaemonTask {
                 jobInfoDetail.getInstance().getTaskId(),
                 jobInfoDetail.getInstance().getId());
         return false;
+    }
+
+    /**
+     * 长时间无法发现 Application 时以 UNKNOWN 收敛展示状态；这表示无法确认 Flink 真实终态，不能误报为 FAILED。
+     * 条件更新只接受 RECONNECTING，避免最后一刻恢复的新 JID 被旧监控线程覆盖。
+     */
+    private boolean markJobUnknownAfterMonitorScanExhausted() {
+        LocalDateTime finishTime = LocalDateTime.now();
+        String error = "Kubernetes Application 长时间未恢复，且未发现可关联的运行态 Flink 作业";
+        boolean updated = jobInstanceService.update(new LambdaUpdateWrapper<JobInstance>()
+                .eq(JobInstance::getId, jobInfoDetail.getInstance().getId())
+                .eq(JobInstance::getStatus, JobStatus.RECONNECTING.getValue())
+                .set(JobInstance::getStatus, JobStatus.UNKNOWN.getValue())
+                .set(JobInstance::getFinishTime, finishTime)
+                .set(JobInstance::getError, error));
+        if (updated) {
+            jobInfoDetail.getInstance().setStatus(JobStatus.UNKNOWN.getValue());
+            jobInfoDetail.getInstance().setFinishTime(finishTime);
+            jobInfoDetail.getInstance().setError(error);
+        }
+        return updated;
     }
 
     /** 每轮延迟重扫额外查询 overview；JobManager 重建产生新 JID 时立即替换内存详情并继续监控。 */

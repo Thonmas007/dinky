@@ -35,10 +35,6 @@ import javax.servlet.http.HttpServletResponse;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.RequestMapping;
 
-import org.dinky.security.FlinkWebLinkAuthenticator;
-import org.dinky.security.FlinkWebLinkAuthenticator.AuthorizationResult;
-
-import cn.dev33.satoken.stp.StpUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.core.util.URLUtil;
 import cn.hutool.http.HttpRequest;
@@ -47,23 +43,16 @@ import cn.hutool.http.HttpUtil;
 import cn.hutool.http.Method;
 import io.swagger.annotations.Api;
 import io.swagger.annotations.ApiOperation;
-import lombok.RequiredArgsConstructor;
 import lombok.SneakyThrows;
 
 @Controller
 @Api(tags = "Flink Proxy API", hidden = true)
 @RequestMapping(FlinkProxyController.API)
-@RequiredArgsConstructor
 public class FlinkProxyController {
     public static final String API = "/api/flink/";
 
     private static final Set<String> HANDOFF_QUERY_KEYS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
-            FlinkWebLinkAuthenticator.USER_PARAM,
-            FlinkWebLinkAuthenticator.TENANT_PARAM,
-            FlinkWebLinkAuthenticator.EXPIRES_PARAM,
-            FlinkWebLinkAuthenticator.SIGNATURE_PARAM)));
-
-    private final FlinkWebLinkAuthenticator linkAuthenticator;
+            "_bg_uid", "_bg_tenant", "_bg_exp", "_bg_sig")));
 
     @RequestMapping("/**")
     @ApiOperation("Flink Proxy API")
@@ -79,27 +68,13 @@ public class FlinkProxyController {
         if (StrUtil.isBlank(path)) {
             return;
         }
-        String address = extractAddress(path);
-        // BlueGame 签发的免登录会话仅用于查看 WebUI；写请求仍要求完整 Dinky 登录态。
-        if (!isReadOnlyMethod(request.getMethod()) && !StpUtil.isLogin()) {
-            resp.sendError(HttpServletResponse.SC_FORBIDDEN, "Signed Flink WebUI sessions are read-only");
+        // 免登录代理只承载 WebUI 查看请求，禁止通过该入口调用 Flink 写接口。
+        if (!isReadOnlyMethod(request.getMethod())) {
+            resp.sendError(HttpServletResponse.SC_FORBIDDEN, "Flink WebUI proxy is read-only");
             return;
         }
-        AuthorizationResult authorization = StrUtil.isBlank(address)
-                ? AuthorizationResult.DENIED
-                : linkAuthenticator.authorize(request, resp, address);
-        if (authorization == AuthorizationResult.DENIED) {
-            resp.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Flink WebUI link is invalid or expired");
-            return;
-        }
-        // 换取浏览器会话的签名参数只供 Dinky 验证，绝不能继续转发给 Flink JobManager。
+        // 兼容已签发的旧链接，但签名参数不再参与鉴权，也绝不能继续转发给 Flink JobManager。
         String query = removeHandoffQuery(request.getQueryString());
-        if (authorization == AuthorizationResult.HANDOFF_ESTABLISHED) {
-            // 先落受限 Cookie 再跳转到干净地址，避免一次性签名页面被浏览器缓存或出现资源加载白屏。
-            resp.setStatus(HttpServletResponse.SC_FOUND);
-            resp.setHeader("Location", buildCleanRedirect(request.getRequestURI(), query));
-            return;
-        }
         if (StrUtil.isNotBlank(query)) {
             path = HttpUtil.urlWithForm(path, URLUtil.decode(query), StandardCharsets.UTF_8, true);
         }
@@ -113,12 +88,6 @@ public class FlinkProxyController {
         return "GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method);
     }
 
-    private String extractAddress(String path) {
-        int slashIndex = path.indexOf('/');
-        String encodedAddress = slashIndex < 0 ? path : path.substring(0, slashIndex);
-        return URLUtil.decode(encodedAddress);
-    }
-
     private String removeHandoffQuery(String query) {
         if (StrUtil.isBlank(query)) {
             return query;
@@ -130,10 +99,6 @@ public class FlinkProxyController {
                     return !HANDOFF_QUERY_KEYS.contains(URLUtil.decode(key));
                 })
                 .collect(Collectors.joining("&"));
-    }
-
-    private String buildCleanRedirect(String requestUri, String query) {
-        return StrUtil.isBlank(query) ? requestUri : requestUri + "?" + query;
     }
 
     @SneakyThrows
