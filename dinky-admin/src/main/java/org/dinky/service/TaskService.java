@@ -128,6 +128,13 @@ public interface TaskService extends ISuperService<Task> {
     boolean cleanupFailedKubernetesTask(Integer taskId);
 
     /**
+     * 仅清理当前仍关联指定失败实例的 Kubernetes Application，防止旧实例的延迟回收误删重提任务。
+     *
+     * @return true 表示已执行清理；false 表示任务已重提或不再属于该失败实例
+     */
+    boolean cleanupFailedKubernetesTaskIfCurrent(Integer taskId, Integer jobInstanceId);
+
+    /**
      * Get the stream graph of the given task job.
      *
      * @param taskDTO The {@link TaskDTO} object representing the task to get the stream graph for.

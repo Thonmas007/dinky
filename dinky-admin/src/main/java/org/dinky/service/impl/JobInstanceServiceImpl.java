@@ -58,6 +58,7 @@ import org.dinky.service.HistoryService;
 import org.dinky.service.JobHistoryService;
 import org.dinky.service.JobInstanceService;
 
+import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.EnumSet;
@@ -98,12 +99,101 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
             JobStatus.RUNNING,
             JobStatus.RESTARTING,
             JobStatus.RECONCILING));
+    private static final int FAILED_APPLICATION_CLEANUP_MAX_ATTEMPTS = 3;
+    private static final String FAILED_APPLICATION_CLEANUP_PENDING = "PENDING";
+    private static final String FAILED_APPLICATION_CLEANUP_RUNNING = "RUNNING";
+    private static final String FAILED_APPLICATION_CLEANUP_SUCCEEDED = "SUCCEEDED";
+    private static final String FAILED_APPLICATION_CLEANUP_SKIPPED = "SKIPPED";
+    private static final String FAILED_APPLICATION_CLEANUP_EXHAUSTED = "EXHAUSTED";
 
     private final HistoryService historyService;
     private final ClusterInstanceService clusterInstanceService;
     private final ClusterConfigurationService clusterConfigurationService;
     private final JobHistoryService jobHistoryService;
     private final TaskMapper taskMapper;
+
+    /**
+     * 作业已明确 FAILED 时登记一小时后的回收计划；计划绑定 JobInstance，防止同名重提任务被旧计划误删。
+     */
+    @Override
+    public void scheduleFailedKubernetesApplicationCleanup(JobInstance jobInstance) {
+        if (!JobStatus.FAILED.getValue().equals(jobInstance.getStatus())) {
+            return;
+        }
+        // 失败状态可能被多个刷新线程重复感知；只允许首次登记，避免反复延长日志保留期或重置已失败次数。
+        TenantContextHolder.ignoreTenant();
+        lambdaUpdate()
+                .eq(JobInstance::getId, jobInstance.getId())
+                .eq(JobInstance::getStatus, JobStatus.FAILED.getValue())
+                .isNull(JobInstance::getFailedCleanupStatus)
+                .set(JobInstance::getFailedCleanupStatus, FAILED_APPLICATION_CLEANUP_PENDING)
+                .set(JobInstance::getFailedCleanupAfter, LocalDateTime.now().plusHours(1))
+                .set(JobInstance::getFailedCleanupAttempts, 0)
+                .update();
+    }
+
+    @Override
+    public List<JobInstance> listDueFailedKubernetesApplicationCleanup(LocalDateTime now, int limit) {
+        TenantContextHolder.ignoreTenant();
+        return lambdaQuery()
+                .eq(JobInstance::getStatus, JobStatus.FAILED.getValue())
+                .eq(JobInstance::getFailedCleanupStatus, FAILED_APPLICATION_CLEANUP_PENDING)
+                .le(JobInstance::getFailedCleanupAfter, now)
+                .lt(JobInstance::getFailedCleanupAttempts, FAILED_APPLICATION_CLEANUP_MAX_ATTEMPTS)
+                .orderByAsc(JobInstance::getFailedCleanupAfter)
+                .last("limit " + limit)
+                .list();
+    }
+
+    @Override
+    public void recoverInterruptedFailedKubernetesApplicationCleanup() {
+        TenantContextHolder.ignoreTenant();
+        lambdaUpdate()
+                .eq(JobInstance::getStatus, JobStatus.FAILED.getValue())
+                .eq(JobInstance::getFailedCleanupStatus, FAILED_APPLICATION_CLEANUP_RUNNING)
+                .set(JobInstance::getFailedCleanupStatus, FAILED_APPLICATION_CLEANUP_PENDING)
+                .update();
+    }
+
+    @Override
+    public boolean claimFailedKubernetesApplicationCleanup(Integer jobInstanceId) {
+        TenantContextHolder.ignoreTenant();
+        return lambdaUpdate()
+                .eq(JobInstance::getId, jobInstanceId)
+                .eq(JobInstance::getStatus, JobStatus.FAILED.getValue())
+                .eq(JobInstance::getFailedCleanupStatus, FAILED_APPLICATION_CLEANUP_PENDING)
+                .lt(JobInstance::getFailedCleanupAttempts, FAILED_APPLICATION_CLEANUP_MAX_ATTEMPTS)
+                .set(JobInstance::getFailedCleanupStatus, FAILED_APPLICATION_CLEANUP_RUNNING)
+                .setSql("failed_cleanup_attempts = COALESCE(failed_cleanup_attempts, 0) + 1")
+                .update();
+    }
+
+    @Override
+    public void finishFailedKubernetesApplicationCleanup(Integer jobInstanceId, boolean success, boolean skipped) {
+        TenantContextHolder.ignoreTenant();
+        JobInstance jobInstance = getByIdWithoutTenant(jobInstanceId);
+        boolean exhausted = !success
+                && !skipped
+                && jobInstance != null
+                && Objects.requireNonNullElse(jobInstance.getFailedCleanupAttempts(), 0)
+                        >= FAILED_APPLICATION_CLEANUP_MAX_ATTEMPTS;
+        String cleanupStatus = skipped
+                ? FAILED_APPLICATION_CLEANUP_SKIPPED
+                : success
+                        ? FAILED_APPLICATION_CLEANUP_SUCCEEDED
+                        : exhausted ? FAILED_APPLICATION_CLEANUP_EXHAUSTED : FAILED_APPLICATION_CLEANUP_PENDING;
+        lambdaUpdate()
+                .eq(JobInstance::getId, jobInstanceId)
+                .eq(JobInstance::getFailedCleanupStatus, FAILED_APPLICATION_CLEANUP_RUNNING)
+                .set(JobInstance::getFailedCleanupStatus, cleanupStatus)
+                .update();
+        if (exhausted) {
+            log.error(
+                    "Failed Kubernetes Application cleanup is exhausted after {} attempts, job instance {} requires manual handling",
+                    FAILED_APPLICATION_CLEANUP_MAX_ATTEMPTS,
+                    jobInstanceId);
+        }
+    }
 
     @Override
     public JobInstance getByIdWithoutTenant(Integer id) {

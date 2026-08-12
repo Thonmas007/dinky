@@ -115,6 +115,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.Lock;
 import java.util.stream.Collectors;
 
 import javax.annotation.Resource;
@@ -134,6 +136,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.google.common.util.concurrent.Striped;
 
 import cn.dev33.satoken.stp.StpUtil;
 import cn.hutool.core.bean.BeanUtil;
@@ -155,6 +158,8 @@ import lombok.extern.slf4j.Slf4j;
 @RequiredArgsConstructor
 @Slf4j
 public class TaskServiceImpl extends SuperServiceImpl<TaskMapper, Task> implements TaskService {
+
+    private static final Striped<Lock> KUBERNETES_APPLICATION_TASK_LOCKS = Striped.lazyWeakLock(256);
 
     private final SavepointsService savepointsService;
     private final ClusterInstanceService clusterInstanceService;
@@ -339,19 +344,31 @@ public class TaskServiceImpl extends SuperServiceImpl<TaskMapper, Task> implemen
         // 注解自调用会失效，这里通过获取对象方法绕过此限制
         TaskServiceImpl taskServiceBean = applicationContext.getBean(TaskServiceImpl.class);
         TaskDTO taskDTO = taskServiceBean.prepareTask(submitDto);
-        // The statement set is enabled by default when submitting assignments
-        taskDTO.setStatementSet(true);
-        JobResult jobResult = taskServiceBean.executeJob(taskDTO);
-        if ((jobResult.getStatus() == Job.JobStatus.FAILED)) {
-            throw new RuntimeException(jobResult.getError());
+        Lock taskOperationLock = null;
+        if (GatewayType.KUBERNETES_APPLICATION == GatewayType.get(taskDTO.getType())) {
+            // 锁覆盖 Kubernetes 提交和 JobInstance 关联落库全过程，避免到期清理夹在两者之间误删新资源。
+            taskOperationLock = KUBERNETES_APPLICATION_TASK_LOCKS.get(submitDto.getId());
+            taskOperationLock.lock();
         }
-        log.info("Job Submit success");
-        Task task = new Task(submitDto.getId(), jobResult.getJobInstanceId());
-        task.setMonitorScanStatus(TaskMonitorScanStatus.NONE.getValue());
-        if (!this.updateById(task)) {
-            throw new BusException(Status.TASK_UPDATE_FAILED.getMessage());
+        try {
+            // The statement set is enabled by default when submitting assignments
+            taskDTO.setStatementSet(true);
+            JobResult jobResult = taskServiceBean.executeJob(taskDTO);
+            if ((jobResult.getStatus() == Job.JobStatus.FAILED)) {
+                throw new RuntimeException(jobResult.getError());
+            }
+            log.info("Job Submit success");
+            Task task = new Task(submitDto.getId(), jobResult.getJobInstanceId());
+            task.setMonitorScanStatus(TaskMonitorScanStatus.NONE.getValue());
+            if (!this.updateById(task)) {
+                throw new BusException(Status.TASK_UPDATE_FAILED.getMessage());
+            }
+            return jobResult;
+        } finally {
+            if (taskOperationLock != null) {
+                taskOperationLock.unlock();
+            }
         }
-        return jobResult;
     }
 
     @Override
@@ -491,6 +508,48 @@ public class TaskServiceImpl extends SuperServiceImpl<TaskMapper, Task> implemen
             throw new BusException("The task is not configured with Kubernetes Application Gateway");
         }
         return ((KubernetesApplicationGateway) gateway).cleanupExistingApplication();
+    }
+
+    /**
+     * 延迟回收前确认任务仍指向原 FAILED 实例；任务已经重提时跳过，避免按同名 Deployment 清理新作业。
+     */
+    @Override
+    public boolean cleanupFailedKubernetesTaskIfCurrent(Integer taskId, Integer jobInstanceId) {
+        Lock taskOperationLock = KUBERNETES_APPLICATION_TASK_LOCKS.get(taskId);
+        taskOperationLock.lock();
+        try {
+            if (!isFailedKubernetesTaskCurrent(taskId, jobInstanceId)) {
+                return false;
+            }
+
+            TaskDTO task = getTaskInfoById(taskId);
+            Gateway gateway = Gateway.build(buildJobSubmitConfig(task).getGatewayConfig());
+            if (!(gateway instanceof KubernetesApplicationGateway)) {
+                throw new BusException("The task is not configured with Kubernetes Application Gateway");
+            }
+            // Gateway 锁再保护同名集群资源，任务锁与集群锁按固定顺序获取以避免交叉死锁。
+            AtomicBoolean guardPassed = new AtomicBoolean(false);
+            ((KubernetesApplicationGateway) gateway).cleanupExistingApplicationIf(() -> {
+                boolean current = isFailedKubernetesTaskCurrent(taskId, jobInstanceId);
+                guardPassed.set(current);
+                return current;
+            });
+            return guardPassed.get();
+        } finally {
+            taskOperationLock.unlock();
+        }
+    }
+
+    /**
+     * 延迟清理只允许处理任务当前关联且仍处于 FAILED 的实例，重提或状态恢复后均不可删除同名资源。
+     */
+    private boolean isFailedKubernetesTaskCurrent(Integer taskId, Integer jobInstanceId) {
+        TaskDTO task = getTaskInfoById(taskId);
+        if (!Objects.equals(task.getJobInstanceId(), jobInstanceId)) {
+            return false;
+        }
+        JobInstance jobInstance = jobInstanceService.getById(jobInstanceId);
+        return jobInstance != null && JobStatus.FAILED.getValue().equals(jobInstance.getStatus());
     }
 
     @Override

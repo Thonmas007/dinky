@@ -400,6 +400,12 @@ public class JobRefreshHandler {
             jobConfig.buildGatewayConfig(configJson);
             jobConfig.getGatewayConfig().setType(GatewayType.get(clusterType));
             jobConfig.getGatewayConfig().getFlinkConfig().setJobName(jobInstance.getName());
+            // 仅 Flink 明确失败时登记延迟清理；UNKNOWN/RECONNECTING 仍保留资源用于自动恢复和排障。
+            if (GatewayType.KUBERNETES_APPLICATION == GatewayType.get(clusterType)
+                    && JobStatus.FAILED.getValue().equals(jobInstance.getStatus())) {
+                jobInstanceService.scheduleFailedKubernetesApplicationCleanup(jobInstance);
+                return;
+            }
             Gateway.build(jobConfig.getGatewayConfig()).onJobFinishCallback(jobInstance.getStatus());
         }
     }

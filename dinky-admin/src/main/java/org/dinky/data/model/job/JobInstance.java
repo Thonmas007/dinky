@@ -143,6 +143,15 @@ public class JobInstance implements Serializable {
             notes = "Count of failed restarts")
     private Integer failedRestartCount;
 
+    /** 记录 FAILED 的 Kubernetes Application 延迟清理状态，服务重启后仍可继续回收。 */
+    private String failedCleanupStatus;
+
+    /** 为保留排障日志而延后执行的资源清理时间。 */
+    private LocalDateTime failedCleanupAfter;
+
+    /** 清理 Kubernetes 资源的已尝试次数，达到上限后保留记录供人工处理。 */
+    private Integer failedCleanupAttempts;
+
     @TableField(fill = FieldFill.INSERT)
     @ApiModelProperty(value = "Creator", required = true, dataType = "Integer", example = "Creator")
     private Integer creator;

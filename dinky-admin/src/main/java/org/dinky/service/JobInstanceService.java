@@ -27,6 +27,7 @@ import org.dinky.data.vo.task.JobInstanceVo;
 import org.dinky.explainer.lineage.LineageResult;
 import org.dinky.mybatis.service.ISuperService;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -37,6 +38,21 @@ import com.fasterxml.jackson.databind.JsonNode;
  * @since 2022/2/2 13:52
  */
 public interface JobInstanceService extends ISuperService<JobInstance> {
+
+    /** 为已确认失败的 Kubernetes Application 登记日志保留期后的资源清理计划。 */
+    void scheduleFailedKubernetesApplicationCleanup(JobInstance jobInstance);
+
+    /** 查询到期且仍待处理的失败 Kubernetes Application，供定时回收任务恢复执行。 */
+    List<JobInstance> listDueFailedKubernetesApplicationCleanup(LocalDateTime now, int limit);
+
+    /** Dinky 异常重启后恢复未完成的领取状态，避免清理计划永久停留在 RUNNING。 */
+    void recoverInterruptedFailedKubernetesApplicationCleanup();
+
+    /** 原子领取清理计划，避免多实例 Dinky 对同一失败任务重复删除资源。 */
+    boolean claimFailedKubernetesApplicationCleanup(Integer jobInstanceId);
+
+    /** 标记清理结果；失败任务可在有限次数内重新进入待处理状态。 */
+    void finishFailedKubernetesApplicationCleanup(Integer jobInstanceId, boolean success, boolean skipped);
 
     /**
      * Get the job instance with the given ID without a tenant.

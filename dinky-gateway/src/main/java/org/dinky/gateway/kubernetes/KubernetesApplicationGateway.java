@@ -60,6 +60,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
+import java.util.function.BooleanSupplier;
 
 import org.yaml.snakeyaml.Yaml;
 
@@ -244,12 +245,26 @@ public class KubernetesApplicationGateway extends KubernetesGateway {
 
     /** 供提交失败后的人工兜底操作使用，仅在同名 Kubernetes Application 仍存在时执行清理。 */
     public boolean cleanupExistingApplication() {
+        return cleanupExistingApplicationIf(() -> true);
+    }
+
+    /**
+     * 延迟回收需要在与提交共用的锁内再次确认归属，避免旧 FAILED 实例在重提期间删除同名的新 Application。
+     */
+    public boolean cleanupExistingApplicationIf(BooleanSupplier cleanupGuard) {
         init();
         String namespace = configuration.getString(KubernetesConfigOptions.NAMESPACE);
         String clusterId = configuration.getString(KubernetesConfigOptions.CLUSTER_ID);
         Lock submitLock = SUBMIT_LOCKS.get(namespace + "/" + clusterId);
         submitLock.lock();
         try (KubernetesClient kubernetesClient = getK8sClientHelper().getKubernetesClient()) {
+            if (!cleanupGuard.getAsBoolean()) {
+                logger.info(
+                        "Skip cleaning Kubernetes application {}/{} because the failed instance is no longer current",
+                        namespace,
+                        clusterId);
+                return false;
+            }
             boolean exists = hasExistingApplicationResources(kubernetesClient, namespace, clusterId);
             if (exists) {
                 cleanupExistingApplication(kubernetesClient, namespace, clusterId);

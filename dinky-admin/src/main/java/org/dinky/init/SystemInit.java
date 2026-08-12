@@ -159,6 +159,12 @@ public class SystemInit implements ApplicationRunner {
         // Init clear job history task
         DaemonTask clearJobHistoryTask = DaemonTask.build(new DaemonTaskConfig(ClearJobHistoryTask.TYPE));
         schedule.addSchedule(clearJobHistoryTask, new PeriodicTrigger(1, TimeUnit.HOURS));
+        // 失败 Application 的回收计划持久化在 JobInstance 中，服务重启后也可继续在日志保留期结束时执行。
+        schedule.addSchedule(
+                "failed-kubernetes-application-cleanup", this::cleanupDueFailedKubernetesApplications,
+                new PeriodicTrigger(3, TimeUnit.MINUTES));
+        jobInstanceService.recoverInterruptedFailedKubernetesApplicationCleanup();
+        cleanupDueFailedKubernetesApplications();
 
         // Add flink running job task to flink job thread pool
         List<JobInstance> jobInstances = jobInstanceService.listJobInstanceActive();
@@ -168,6 +174,27 @@ public class SystemInit implements ApplicationRunner {
                     DaemonTaskConfig.build(FlinkJobTask.TYPE, jobInstance.getId(), jobInstance.getTaskId());
             DaemonTask daemonTask = DaemonTask.build(config);
             flinkJobThreadPool.execute(daemonTask);
+        }
+    }
+
+    /**
+     * 到期前先原子领取计划，再校验任务当前关联的 JobInstance；重提同名任务会跳过旧计划，避免误删新 Deployment。
+     */
+    private void cleanupDueFailedKubernetesApplications() {
+        List<JobInstance> jobInstances = jobInstanceService.listDueFailedKubernetesApplicationCleanup(
+                java.time.LocalDateTime.now(), 100);
+        for (JobInstance jobInstance : jobInstances) {
+            if (!jobInstanceService.claimFailedKubernetesApplicationCleanup(jobInstance.getId())) {
+                continue;
+            }
+            try {
+                boolean cleaned = taskService.cleanupFailedKubernetesTaskIfCurrent(
+                        jobInstance.getTaskId(), jobInstance.getId());
+                jobInstanceService.finishFailedKubernetesApplicationCleanup(jobInstance.getId(), cleaned, !cleaned);
+            } catch (Exception e) {
+                log.error("Failed to clean Kubernetes Application for failed job instance {}", jobInstance.getId(), e);
+                jobInstanceService.finishFailedKubernetesApplicationCleanup(jobInstance.getId(), false, false);
+            }
         }
     }
 
