@@ -204,7 +204,7 @@ public class JobInstanceController {
     public Result<JobInfoDetail> discoverJobId(@RequestParam Integer id) {
         JobInfoDetail discoveredJob = jobInstanceService.discoverJobId(id);
         if (discoveredJob == null) {
-            return Result.failed("未发现同名且处于运行态的 Flink 作业，请确认 JobManager REST 地址和作业状态");
+            return Result.failed("未发现可唯一识别的运行态 Flink 作业，请确认 JobManager REST 地址和作业状态");
         }
 
         JobInstance jobInstance = discoveredJob.getInstance();

@@ -43,7 +43,7 @@ class JobInstanceServiceImplTest {
         JsonNode latestRunning = job("latest-running", "datagen-task-v12", "RUNNING", 300L);
         JsonNode differentName = job("different", "other-task", "RUNNING", 400L);
 
-        Optional<JsonNode> result = JobInstanceServiceImpl.findLatestActiveJob(
+        Optional<JsonNode> result = JobInstanceServiceImpl.findDiscoverableJob(
                 Arrays.asList(finished, olderRunning, latestRunning, differentName), "datagen-task-v12");
 
         assertTrue(result.isPresent());
@@ -53,11 +53,36 @@ class JobInstanceServiceImplTest {
     /** 不允许把失败、取消等终态作业重新关联到仍需恢复的 Dinky 实例。 */
     @Test
     void shouldIgnoreTerminalJobs() throws Exception {
-        Optional<JsonNode> result = JobInstanceServiceImpl.findLatestActiveJob(
+        Optional<JsonNode> result = JobInstanceServiceImpl.findDiscoverableJob(
                 Arrays.asList(
                         job("failed", "datagen-task-v12", "FAILED", 200L),
                         job("canceled", "datagen-task-v12", "CANCELED", 300L)),
                 "datagen-task-v12");
+
+        assertFalse(result.isPresent());
+    }
+
+    /** SQL 显式设置 JobGraph 名称时，Application 集群中的唯一活跃作业仍应能恢复关联。 */
+    @Test
+    void shouldUseSoleActiveJobWhenJobGraphNameDiffers() throws Exception {
+        Optional<JsonNode> result = JobInstanceServiceImpl.findDiscoverableJob(
+                Arrays.asList(
+                        job("old-finished", "pf-oneid-agent-relation", "FINISHED", 100L),
+                        job("new-running", "MysqlToClickHouseOneId", "RUNNING", 200L)),
+                "pf-oneid-agent-relation");
+
+        assertTrue(result.isPresent());
+        assertEquals("new-running", result.get().path("jid").asText());
+    }
+
+    /** 无同名结果且存在多个活跃作业时无法安全判断归属，必须拒绝自动关联。 */
+    @Test
+    void shouldRejectAmbiguousActiveJobsWithDifferentNames() throws Exception {
+        Optional<JsonNode> result = JobInstanceServiceImpl.findDiscoverableJob(
+                Arrays.asList(
+                        job("first-running", "first-job", "RUNNING", 100L),
+                        job("second-running", "second-job", "RUNNING", 200L)),
+                "pf-oneid-agent-relation");
 
         assertFalse(result.isPresent());
     }

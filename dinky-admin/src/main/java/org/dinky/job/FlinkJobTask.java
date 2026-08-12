@@ -53,7 +53,8 @@ import lombok.extern.slf4j.Slf4j;
 @Data
 public class FlinkJobTask implements DaemonTask {
 
-    private static final int MONITOR_SCAN_MAX_RETRY = 3;
+    // 节点拉起、镜像下载和 Flink 状态恢复可能持续数分钟，保留约 10 分钟自动发现窗口。
+    private static final int MONITOR_SCAN_MAX_RETRY = 20;
     private static final long MONITOR_SCAN_RETRY_INTERVAL_MS = 30_000L;
 
     private DaemonTaskConfig config;
@@ -179,7 +180,7 @@ public class FlinkJobTask implements DaemonTask {
                 || (isDone && JobStatus.UNKNOWN.getValue().equals(status));
     }
 
-    /** 监控失败先保留实例关联，按 30 秒间隔最多重扫三次，全部失败后才停止监控并标记任务扫描失败。 */
+    /** 监控失败先保留实例关联，按 30 秒间隔持续重扫约 10 分钟，全部失败后才停止监控并标记任务扫描失败。 */
     private boolean handleMonitorScanRetry() {
         if (!isMonitorScanActive()) {
             markTaskMonitorScanStatus(TaskMonitorScanStatus.SCANNING);

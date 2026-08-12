@@ -67,6 +67,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -367,10 +368,10 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
                     e.toString());
             return null;
         }
-        Optional<JsonNode> activeJob = findLatestActiveJob(flinkJobs, jobInstance.getName());
+        Optional<JsonNode> activeJob = findDiscoverableJob(flinkJobs, jobInstance.getName());
         if (!activeJob.isPresent()) {
             log.warn(
-                    "No active Flink job named {} was found from {}, job instance {}",
+                    "No uniquely discoverable active Flink job was found for expected name {} from {}, job instance {}",
                     jobInstance.getName(),
                     jobManagerHost,
                     jobInstanceId);
@@ -426,17 +427,27 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
         return getJobInfoDetail(jobInstanceId);
     }
 
-    /** 同名作业可能残留多个历史记录，只允许选择最新的可恢复运行态，避免关联到已结束的旧作业。 */
-    static Optional<JsonNode> findLatestActiveJob(List<JsonNode> jobs, String jobName) {
+    /**
+     * SQL 可通过 pipeline.name 等配置覆盖 Flink JobGraph 名称，使其与 Dinky 实例名不同。
+     * Kubernetes Application 集群通常只承载一个活跃作业，因此无同名结果时仅允许唯一活跃作业兜底；
+     * 若存在多个候选则拒绝猜测，避免把实例关联到错误作业。
+     */
+    static Optional<JsonNode> findDiscoverableJob(List<JsonNode> jobs, String jobName) {
         if (jobs == null || StrUtil.isBlank(jobName)) {
             return Optional.empty();
         }
-        return jobs.stream()
+        List<JsonNode> activeJobs = jobs.stream()
                 .filter(Objects::nonNull)
-                .filter(job -> StrUtil.equals(jobName, job.path("name").asText()))
                 .filter(job -> DISCOVERABLE_JOB_STATUSES.contains(JobStatus.get(job.path("state").asText())))
                 .filter(job -> StrUtil.isNotBlank(job.path("jid").asText()))
+                .collect(Collectors.toList());
+        Optional<JsonNode> sameNameJob = activeJobs.stream()
+                .filter(job -> StrUtil.equals(jobName, job.path("name").asText()))
                 .max(Comparator.comparingLong((JsonNode job) -> job.path("start-time").asLong(0L)));
+        if (sameNameJob.isPresent()) {
+            return sameNameJob;
+        }
+        return activeJobs.size() == 1 ? Optional.of(activeJobs.get(0)) : Optional.empty();
     }
 
     @Override
