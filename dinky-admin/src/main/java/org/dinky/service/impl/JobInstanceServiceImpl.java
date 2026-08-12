@@ -120,6 +120,8 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
         if (!JobStatus.FAILED.getValue().equals(jobInstance.getStatus())) {
             return;
         }
+        LocalDateTime cleanupAfter = Optional.ofNullable(jobInstance.getFailedCleanupAfter())
+                .orElseGet(() -> LocalDateTime.now().plusHours(1));
         // 失败状态可能被多个刷新线程重复感知；只允许首次登记，避免反复延长日志保留期或重置已失败次数。
         TenantContextHolder.ignoreTenant();
         lambdaUpdate()
@@ -127,7 +129,7 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
                 .eq(JobInstance::getStatus, JobStatus.FAILED.getValue())
                 .isNull(JobInstance::getFailedCleanupStatus)
                 .set(JobInstance::getFailedCleanupStatus, FAILED_APPLICATION_CLEANUP_PENDING)
-                .set(JobInstance::getFailedCleanupAfter, LocalDateTime.now().plusHours(1))
+                .set(JobInstance::getFailedCleanupAfter, cleanupAfter)
                 .set(JobInstance::getFailedCleanupAttempts, 0)
                 .update();
     }

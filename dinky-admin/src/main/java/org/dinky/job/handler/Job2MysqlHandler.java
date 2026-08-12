@@ -29,6 +29,7 @@ import org.dinky.data.dto.ClusterInstanceDTO;
 import org.dinky.data.enums.GatewayType;
 import org.dinky.data.enums.JobStatus;
 import org.dinky.data.exception.BusException;
+import org.dinky.data.model.ClusterConfiguration;
 import org.dinky.data.model.ClusterInstance;
 import org.dinky.data.model.Task;
 import org.dinky.data.model.job.History;
@@ -67,6 +68,7 @@ import lombok.extern.slf4j.Slf4j;
 @DependsOn("springContextUtils")
 public class Job2MysqlHandler extends AbsJobHandler {
 
+    private static final long SUBMISSION_FAILURE_LOG_RETENTION_MINUTES = 15;
     private static final HistoryService historyService;
     private static final ClusterInstanceService clusterInstanceService;
     private static final ClusterConfigurationService clusterConfigurationService;
@@ -233,7 +235,61 @@ public class Job2MysqlHandler extends AbsJobHandler {
         history.setEndTime(job.getEndTime());
         history.setError(job.getError());
         historyService.updateById(history);
+        if (shouldScheduleFailedKubernetesApplicationCleanup()) {
+            persistFailedKubernetesApplicationCleanup();
+        }
         return true;
+    }
+
+    /**
+     * Kubernetes Application 在 JobGraph 创建前失败时没有 JID，仍需生成 FAILED 实例承载持久化清理计划。
+     */
+    private boolean shouldScheduleFailedKubernetesApplicationCleanup() {
+        return job.isUseGateway()
+                && job.isPipeline()
+                && GatewayType.KUBERNETES_APPLICATION == job.getType()
+                && Asserts.isNull(job.getJobInstanceId());
+    }
+
+    /**
+     * 启动阶段失败通常会触发 Pod CrashLoop，日志保留 15 分钟后进入既有三次清理链路；
+     * Task 关联到该失败实例后，重提任务会使旧计划自动跳过，避免误删新 Application。
+     */
+    private void persistFailedKubernetesApplicationCleanup() {
+        Integer taskId = job.getJobConfig().getTaskId();
+        JobInstance jobInstance = new JobInstance();
+        jobInstance.setHistoryId(job.getId());
+        jobInstance.setTaskId(taskId);
+        jobInstance.setName(job.getJobConfig().getJobName());
+        jobInstance.setJid(job.getJobId());
+        jobInstance.setStep(job.getJobConfig().getStep());
+        jobInstance.setStatus(JobStatus.FAILED.getValue());
+        jobInstance.setFinishTime(job.getEndTime());
+        jobInstance.setError(job.getError());
+        jobInstance.setFailedCleanupAfter(
+                job.getEndTime().plusMinutes(SUBMISSION_FAILURE_LOG_RETENTION_MINUTES));
+        jobInstanceService.save(jobInstance);
+        job.setJobInstanceId(jobInstance.getId());
+
+        Task task = new Task(taskId, jobInstance.getId());
+        taskService.updateById(task);
+
+        Integer clusterConfigurationId = job.getJobConfig().getClusterConfigurationId();
+        ClusterConfiguration clusterConfiguration = Asserts.isNotNull(clusterConfigurationId)
+                ? clusterConfigurationService.getClusterConfigById(clusterConfigurationId)
+                : null;
+        JobHistory jobHistory = JobHistory.builder()
+                .id(jobInstance.getId())
+                .clusterConfigurationJson(Asserts.isNotNull(clusterConfiguration)
+                        ? ClusterConfigurationMapping.getClusterConfigurationMapping(clusterConfiguration)
+                        : null)
+                .build();
+        jobHistoryService.save(jobHistory);
+        jobInstanceService.scheduleFailedKubernetesApplicationCleanup(jobInstance);
+        log.warn(
+                "Kubernetes Application submission failed before Job ID creation; scheduled cleanup for job instance {} after {} minutes",
+                jobInstance.getId(),
+                SUBMISSION_FAILURE_LOG_RETENTION_MINUTES);
     }
 
     @Override
