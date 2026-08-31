@@ -203,6 +203,14 @@ public class KubernetesApplicationGateway extends KubernetesGateway {
     protected void tryCleanupExistingApplicationBeforeSubmit(
             KubernetesClient kubernetesClient, String namespace, String clusterId) {
         try {
+            // 同名资源可能已被上一次停止流程删除，先确认存在再清理，避免旧 Fabric8 对空删除返回异常。
+            if (!hasExistingApplicationResources(kubernetesClient, namespace, clusterId)) {
+                logger.info(
+                        "Skip cleaning Kubernetes application {}/{} because no existing resources were found",
+                        namespace,
+                        clusterId);
+                return;
+            }
             cleanupExistingApplication(kubernetesClient, namespace, clusterId);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -223,11 +231,8 @@ public class KubernetesApplicationGateway extends KubernetesGateway {
     /** 二次提交复用原有停止链路清理同名 Flink Application，避免预检查失败导致清理动作无法执行。 */
     protected void cleanupExistingApplication(KubernetesClient kubernetesClient, String namespace, String clusterId)
             throws InterruptedException {
-        logger.warn(
-                "Try to clean Kubernetes application {} in namespace {} before resubmit",
-                clusterId,
-                namespace);
-        // 该 Flink 原生清理操作与已有停止功能使用同一链路，目标不存在时也可安全重复执行。
+        logger.warn("Try to clean Kubernetes application {} in namespace {} before resubmit", clusterId, namespace);
+        // 该 Flink 原生清理操作与已有停止功能使用同一链路，由调用方保证目标资源仍然存在。
         getK8sClientHelper().getClient().stopAndCleanupCluster(clusterId);
 
         for (int retry = 0; retry < EXISTING_CLUSTER_DELETE_TIMEOUT_SECONDS; retry++) {

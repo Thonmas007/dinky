@@ -89,7 +89,9 @@ public class AppConfig implements WebMvcConfigurer {
                         throw new StopMatchException();
                     }
                 }))
-                .addPathPatterns("/api/**", "/openapi/**")
+                // Kubernetes 探针只读取健康状态，不携带用户凭证；仅放行 health，避免扩大 Actuator 暴露范围。
+                .addPathPatterns(
+                        "/api/**", "/openapi/**", "/actuator/health", "/actuator/health/**")
                 .excludePathPatterns(
                         "/api/login",
                         "/api/sysConfig/getNeededCfg",
@@ -98,7 +100,9 @@ public class AppConfig implements WebMvcConfigurer {
                         "/druid/**",
                         // Flink WebUI 代理由控制器限制为只读请求，不依赖 Dinky 登录和租户上下文。
                         "/api/flink/**",
-                        "/api/version");
+                        "/api/version",
+                        "/actuator/health",
+                        "/actuator/health/**");
 
         registry.addInterceptor(new TenantInterceptor())
                 .addPathPatterns("/api/**")

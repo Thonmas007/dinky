@@ -32,8 +32,11 @@ import org.apache.flink.kubernetes.kubeclient.FlinkKubeClient;
 
 import java.util.Collections;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.Test;
+
+import io.fabric8.kubernetes.client.KubernetesClient;
 
 public class KubernetesGatewayTest {
 
@@ -88,5 +91,28 @@ public class KubernetesGatewayTest {
                 .isEqualTo(webUrl);
         assertThat(KubernetesApplicationGateway.buildRestQueryUrl("ClusterIP", null, webUrl))
                 .isEqualTo(webUrl);
+    }
+
+    /** 验证同名资源已不存在时不再重复删除，避免旧 Fabric8 将幂等删除误报为提交异常。 */
+    @Test
+    public void testSkipCleanupBeforeSubmitWhenApplicationDoesNotExist() {
+        AtomicBoolean cleanupCalled = new AtomicBoolean(false);
+        KubernetesApplicationGateway gateway = new KubernetesApplicationGateway() {
+            @Override
+            protected boolean hasExistingApplicationResources(
+                    KubernetesClient kubernetesClient, String namespace, String clusterId) {
+                return false;
+            }
+
+            @Override
+            protected void cleanupExistingApplication(
+                    KubernetesClient kubernetesClient, String namespace, String clusterId) {
+                cleanupCalled.set(true);
+            }
+        };
+
+        gateway.tryCleanupExistingApplicationBeforeSubmit(mock(KubernetesClient.class), "flink-dev", "demo-job");
+
+        assertThat(cleanupCalled).isFalse();
     }
 }
