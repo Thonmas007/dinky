@@ -183,11 +183,11 @@ PARAMS_OPT="-Ddinky.logs.path=${DINKY_LOG_PATH} -Ddinky.root.path=${APP_HOME} -D
 JAR_PARAMS_OPT="--logging.config=${LOG_CONFIG}"
 # JMX path
 JMX="-javaagent:$APP_HOME/lib/jmx_prometheus_javaagent-0.20.0.jar=10087:$APP_HOME/config/jmx/jmx_exporter_config.yaml"
-# JVM 参数需兼容 JDK 8 与新版本；PermGen 在 JDK 8 之后已移除，继续传入会导致进程无法启动。
+# JVM 参数需兼容 JDK 8 与新版本；4Gi 容器为堆外内存和 Flink/Dinky 本地开销预留约 1.5Gi，避免触发 cgroup OOM。
 if [ ${JAVA_VERSION} = "1.8" ];then
-  JVM_OPTS="-Xms512M -Xmx2048M -XX:PermSize=512M -XX:MaxPermSize=1024M"
+  JVM_OPTS="-Xms1G -Xmx2560M -XX:PermSize=512M -XX:MaxPermSize=1024M"
 else
-  JVM_OPTS="-Xms512M -Xmx2048M"
+  JVM_OPTS="-Xms1G -Xmx2560M"
 fi
 
 # Check whether the pid path exists
