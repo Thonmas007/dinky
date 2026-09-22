@@ -309,6 +309,10 @@
             <includes>
                 <include>**/**</include>
             </includes>
+            <!-- 本地 kubeconfig 可能包含集群凭据，只允许留在工作区，不能进入公开发布包。 -->
+            <excludes>
+                <exclude>**/*.kubeconfig</exclude>
+            </excludes>
         </fileSet>
         <!--<fileSet>
             <directory>${project.parent.basedir}/dinky-web/dist</directory>
