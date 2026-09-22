@@ -21,7 +21,7 @@ import { CircleBtn } from '@/components/CallBackButton/CircleBtn';
 import JobLifeCycleTag from '@/components/JobTags/JobLifeCycleTag';
 import StatusTag from '@/components/JobTags/StatusTag';
 import { DevopsContext } from '@/pages/DevOps';
-import { JOB_LIFE_CYCLE } from '@/pages/DevOps/constants';
+import { JOB_LIFE_CYCLE, JOB_STATUS } from '@/pages/DevOps/constants';
 import { getJobDuration } from '@/pages/DevOps/function';
 import JobHistoryList from '@/pages/DevOps/JobList/components/JobHistoryList/JobHistoryList';
 import { SysConfigStateType } from '@/pages/SettingCenter/GlobalSetting/model';
