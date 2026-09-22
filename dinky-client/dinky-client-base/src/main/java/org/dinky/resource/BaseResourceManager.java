@@ -147,7 +147,12 @@ public interface BaseResourceManager {
     }
 
     default String getFilePath(String path) {
-        return FileUtil.normalize(FileUtil.file(getBasePath(), path).toString());
+        // 资源表里的 fullName 统一保留展示用的前导斜杠，真正落盘前要先转成相对路径，避免拼到 basePath 外。
+        String relativePath = path;
+        while (StrUtil.isNotBlank(relativePath) && relativePath.startsWith(StrUtil.SLASH)) {
+            relativePath = StrUtil.removePrefix(relativePath, StrUtil.SLASH);
+        }
+        return FileUtil.normalize(FileUtil.file(getBasePath(), relativePath).toString());
     }
 
     default String getBasePath() {

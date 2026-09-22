@@ -79,7 +79,7 @@ public class LocalResourceManager implements BaseResourceManager {
     @Override
     public void putFile(String path, InputStream fileStream) {
         try {
-            FileUtil.writeFromStream(fileStream, getFilePath(path));
+            FileUtil.writeFromStream(fileStream, prepareTargetFile(path));
         } catch (Exception e) {
             log.error("putFile file failed", e);
             throw new BusException(e.getMessage());
@@ -89,7 +89,7 @@ public class LocalResourceManager implements BaseResourceManager {
     @Override
     public void putFile(String path, File file) {
         BufferedInputStream inputStream = FileUtil.getInputStream(file);
-        FileUtil.writeFromStream(inputStream, getFilePath(path));
+        FileUtil.writeFromStream(inputStream, prepareTargetFile(path));
     }
 
     @Override
@@ -148,5 +148,14 @@ public class LocalResourceManager implements BaseResourceManager {
     @Override
     public FileSystem getFileSystem() {
         return HttpFileSystem.INSTANCE;
+    }
+
+    /**
+     * 资源目录可能只在数据库中存在，真正落盘前要先把父目录补齐。
+     */
+    private File prepareTargetFile(String path) {
+        File targetFile = new File(getFilePath(path));
+        FileUtil.mkParentDirs(targetFile);
+        return targetFile;
     }
 }

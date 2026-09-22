@@ -74,7 +74,7 @@ public class LocalResourceManager implements BaseResourceManager {
     @Override
     public void putFile(String path, InputStream fileStream) {
         try {
-            FileUtil.writeFromStream(fileStream, getFilePath(path));
+            FileUtil.writeFromStream(fileStream, prepareTargetFile(path));
         } catch (Exception e) {
             throw BusException.of(e, Status.RESOURCE_FILE_UPLOAD_FAILED);
         }
@@ -83,7 +83,7 @@ public class LocalResourceManager implements BaseResourceManager {
     @Override
     public void putFile(String path, File file) {
         BufferedInputStream inputStream = FileUtil.getInputStream(file);
-        FileUtil.writeFromStream(inputStream, getFilePath(path));
+        FileUtil.writeFromStream(inputStream, prepareTargetFile(path));
     }
 
     @Override
@@ -137,5 +137,14 @@ public class LocalResourceManager implements BaseResourceManager {
     @Override
     public FileSystem getFileSystem() {
         return LocalFileSystem.getSharedInstance();
+    }
+
+    /**
+     * 资源树里有目录节点，不代表磁盘上已经存在对应父目录，上传前要先补齐路径。
+     */
+    private File prepareTargetFile(String path) {
+        File targetFile = new File(getFilePath(path));
+        FileUtil.mkParentDirs(targetFile);
+        return targetFile;
     }
 }
