@@ -36,6 +36,18 @@ const operatorType = {
   SAVEPOINT_STOP: 'stop',
   AUTO_STOP: 'autostop'
 };
+
+const kubernetesApplicationTypes = [
+  'ka',
+  'kao',
+  'kubernetes-application',
+  'kubernetes-application-operator'
+];
+
+// 失败态可能没有集群实例信息，需回看历史提交模式来保留人工恢复入口。
+const isKubernetesApplicationMode = (type?: string) =>
+  !!type && kubernetesApplicationTypes.includes(type);
+
 export type OperatorType = {
   jobDetail: Jobs.JobInfoDetail;
   refesh: (isForce: boolean) => void;
@@ -44,13 +56,9 @@ const JobOperator = (props: OperatorType) => {
   const { jobDetail, refesh } = props;
   const [discovering, setDiscovering] = useState(false);
   const jobManagerHost = jobDetail?.clusterInstance?.jobManagerHost;
-  const clusterType = jobDetail?.clusterInstance?.type;
-  const canDiscoverJobId = [
-    'ka',
-    'kao',
-    'kubernetes-application',
-    'kubernetes-application-operator'
-  ].includes(clusterType as string);
+  const canDiscoverJobId =
+    isKubernetesApplicationMode(jobDetail?.clusterInstance?.type) ||
+    isKubernetesApplicationMode(jobDetail?.history?.type);
   const webUri =
     jobManagerHost?.startsWith('http://') || jobManagerHost?.startsWith('https://')
       ? jobManagerHost

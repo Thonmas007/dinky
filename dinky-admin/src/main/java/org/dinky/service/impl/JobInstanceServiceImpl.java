@@ -68,6 +68,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -100,6 +101,8 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
             JobStatus.RUNNING,
             JobStatus.RESTARTING,
             JobStatus.RECONCILING));
+    private static final String KUBERNETES_NAMESPACE_KEY = "kubernetes.namespace";
+    private static final int FLINK_REST_PORT = 8081;
     private static final int FAILED_APPLICATION_CLEANUP_MAX_ATTEMPTS = 3;
     private static final String FAILED_APPLICATION_CLEANUP_PENDING = "PENDING";
     private static final String FAILED_APPLICATION_CLEANUP_RUNNING = "RUNNING";
@@ -309,6 +312,7 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
             jobDataDto = JobDataDto.fromJobHistory(jobHistory);
         }
         jobInfoDetail.setJobDataDto(jobDataDto);
+        completeMissingKubernetesApplicationClusterInstance(jobInfoDetail);
 
         return jobInfoDetail;
     }
@@ -343,37 +347,38 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
     public JobInfoDetail discoverJobId(Integer jobInstanceId) {
         JobInfoDetail jobInfoDetail = getJobInfoDetail(jobInstanceId);
         JobInstance jobInstance = jobInfoDetail.getInstance();
-        ClusterInstance clusterInstance = jobInfoDetail.getClusterInstance();
-        if (clusterInstance == null
-                || !GatewayType.get(clusterInstance.getType()).isKubernetesApplicationMode()) {
+        if (!isDiscoverableKubernetesApplication(jobInfoDetail)) {
             log.warn("Job ID discovery only supports Kubernetes Application, job instance {}", jobInstanceId);
             return null;
         }
 
-        String jobManagerHost = clusterInstance.getJobManagerHost();
-        if (StrUtil.isBlank(jobManagerHost)) {
+        String jobManagerHost = getDiscoverJobManagerHost(jobInfoDetail);
+        Optional<JsonNode> activeJob = Optional.empty();
+        if (StrUtil.isNotBlank(jobManagerHost)) {
+            activeJob = queryDiscoverableJob(jobManagerHost, jobInstance, jobInstanceId);
+        } else {
             log.warn("JobManager REST address is empty, cannot discover Job ID for instance {}", jobInstanceId);
-            return null;
         }
 
-        List<JsonNode> flinkJobs;
-        try {
-            flinkJobs = FlinkAPI.build(jobManagerHost).listJobs();
-        } catch (Exception e) {
-            // REST 暂不可达时保留旧关联，等待下一轮扫描，不能把网络故障误判成没有运行中的作业。
-            log.warn(
-                    "Query Flink job overview from {} failed for instance {}: {}",
-                    jobManagerHost,
-                    jobInstanceId,
-                    e.toString());
-            return null;
+        if (!activeJob.isPresent()) {
+            String serviceAddress = buildKubernetesRestServiceAddress(
+                    jobInstance.getName(), getKubernetesNamespace(jobInfoDetail));
+            if (StrUtil.isNotBlank(serviceAddress) && !StrUtil.equals(jobManagerHost, serviceAddress)) {
+                // dev 缩容重建可能改变 Service ClusterIP，旧地址失效时按稳定的作业名和 namespace 再查一次。
+                log.info(
+                        "Retry Flink job discovery for instance {} through Kubernetes service {}",
+                        jobInstanceId,
+                        serviceAddress);
+                activeJob = queryDiscoverableJob(serviceAddress, jobInstance, jobInstanceId);
+                if (activeJob.isPresent()) {
+                    refreshJobManagerAddress(jobInfoDetail, serviceAddress);
+                }
+            }
         }
-        Optional<JsonNode> activeJob = findDiscoverableJob(flinkJobs, jobInstance.getName());
         if (!activeJob.isPresent()) {
             log.warn(
-                    "No uniquely discoverable active Flink job was found for expected name {} from {}, job instance {}",
+                    "No uniquely discoverable active Flink job was found for expected name {}, job instance {}",
                     jobInstance.getName(),
-                    jobManagerHost,
                     jobInstanceId);
             return null;
         }
@@ -425,6 +430,228 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
                 newJobId,
                 newStatus);
         return getJobInfoDetail(jobInstanceId);
+    }
+
+    /** 查询指定 REST 地址并选择可安全关联的活跃作业，网络异常时保留旧关联供后续重试。 */
+    private Optional<JsonNode> queryDiscoverableJob(
+            String jobManagerHost, JobInstance jobInstance, Integer jobInstanceId) {
+        try {
+            List<JsonNode> flinkJobs = FlinkAPI.build(jobManagerHost).listJobs();
+            return findDiscoverableJob(flinkJobs, jobInstance.getName());
+        } catch (Exception e) {
+            log.warn(
+                    "Query Flink job overview from {} failed for instance {}: {}",
+                    jobManagerHost,
+                    jobInstanceId,
+                    e.toString());
+            return Optional.empty();
+        }
+    }
+
+    /** 失败页可能丢失当前集群实例，只要历史提交模式属于 K8s Application，仍允许按作业名主动恢复 JID。 */
+    static boolean isDiscoverableKubernetesApplication(JobInfoDetail jobInfoDetail) {
+        if (jobInfoDetail == null) {
+            return false;
+        }
+        return Stream.of(
+                        Optional.ofNullable(jobInfoDetail.getClusterInstance()).map(ClusterInstance::getType),
+                        Optional.ofNullable(jobInfoDetail.getHistory()).map(History::getType),
+                        Optional.ofNullable(jobInfoDetail.getJobDataDto())
+                                .map(JobDataDto::getCluster)
+                                .map(ClusterInstanceMapping::getType),
+                        Optional.ofNullable(jobInfoDetail.getJobDataDto())
+                                .map(JobDataDto::getClusterConfiguration)
+                                .map(ClusterConfigurationMapping::getType),
+                        Optional.ofNullable(jobInfoDetail.getClusterConfiguration()).map(ClusterConfigurationDTO::getType))
+                .filter(Optional::isPresent)
+                .map(Optional::get)
+                .anyMatch(type -> GatewayType.get(type).isKubernetesApplicationMode());
+    }
+
+    /** 优先使用当前集群地址，集群实例被清理时再回退到历史快照和提交历史中的 REST 地址。 */
+    static String getDiscoverJobManagerHost(JobInfoDetail jobInfoDetail) {
+        String currentHost = Optional.ofNullable(jobInfoDetail)
+                .map(JobInfoDetail::getClusterInstance)
+                .map(ClusterInstance::getJobManagerHost)
+                .orElse(null);
+        if (StrUtil.isNotBlank(currentHost)) {
+            return currentHost;
+        }
+        String historySnapshotHost = Optional.ofNullable(jobInfoDetail)
+                .map(JobInfoDetail::getJobDataDto)
+                .map(JobDataDto::getCluster)
+                .map(ClusterInstanceMapping::getJobManagerHost)
+                .orElse(null);
+        if (StrUtil.isNotBlank(historySnapshotHost)) {
+            return historySnapshotHost;
+        }
+        return Optional.ofNullable(jobInfoDetail)
+                .map(JobInfoDetail::getHistory)
+                .map(History::getJobManagerAddress)
+                .orElse(null);
+    }
+
+    /** clusterId 指向的注册记录丢失时，从历史快照补一个运行时实例，避免强制刷新立刻把恢复结果写回 UNKNOWN。 */
+    private static void completeMissingKubernetesApplicationClusterInstance(JobInfoDetail jobInfoDetail) {
+        if (jobInfoDetail == null || jobInfoDetail.getClusterInstance() != null) {
+            return;
+        }
+        Optional.ofNullable(buildDiscoverClusterInstance(jobInfoDetail)).ifPresent(jobInfoDetail::setClusterInstance);
+    }
+
+    /** 该实例只用于当前详情刷新和 Flink REST 代理，不入库，防止恢复旧作业时污染注册中心。 */
+    static ClusterInstance buildDiscoverClusterInstance(JobInfoDetail jobInfoDetail) {
+        if (!isDiscoverableKubernetesApplication(jobInfoDetail)) {
+            return null;
+        }
+
+        String jobName = getDiscoverJobName(jobInfoDetail);
+        String type = getDiscoverClusterType(jobInfoDetail);
+        String jobManagerHost = getDiscoverJobManagerHost(jobInfoDetail);
+        if (StrUtil.isBlank(jobManagerHost)) {
+            jobManagerHost = buildKubernetesRestServiceAddress(jobName, getKubernetesNamespace(jobInfoDetail));
+        }
+        if (StrUtil.hasBlank(jobName, type, jobManagerHost)) {
+            return null;
+        }
+
+        ClusterInstance clusterInstance = new ClusterInstance();
+        clusterInstance.setName(jobName);
+        clusterInstance.setAlias(jobName);
+        clusterInstance.setType(type);
+        clusterInstance.setHosts(jobManagerHost);
+        clusterInstance.setJobManagerHost(jobManagerHost);
+        clusterInstance.setEnabled(true);
+        clusterInstance.setStatus(1);
+        clusterInstance.setAutoRegisters(true);
+        clusterInstance.setTaskId(getDiscoverTaskId(jobInfoDetail));
+        clusterInstance.setClusterConfigurationId(getDiscoverClusterConfigurationId(jobInfoDetail));
+        return clusterInstance;
+    }
+
+    private static String getDiscoverClusterType(JobInfoDetail jobInfoDetail) {
+        return Stream.of(
+                        Optional.ofNullable(jobInfoDetail)
+                                .map(JobInfoDetail::getClusterInstance)
+                                .map(ClusterInstance::getType),
+                        Optional.ofNullable(jobInfoDetail).map(JobInfoDetail::getHistory).map(History::getType),
+                        Optional.ofNullable(jobInfoDetail)
+                                .map(JobInfoDetail::getJobDataDto)
+                                .map(JobDataDto::getCluster)
+                                .map(ClusterInstanceMapping::getType),
+                        Optional.ofNullable(jobInfoDetail)
+                                .map(JobInfoDetail::getJobDataDto)
+                                .map(JobDataDto::getClusterConfiguration)
+                                .map(ClusterConfigurationMapping::getType),
+                        Optional.ofNullable(jobInfoDetail)
+                                .map(JobInfoDetail::getClusterConfiguration)
+                                .map(ClusterConfigurationDTO::getType))
+                .filter(Optional::isPresent)
+                .map(Optional::get)
+                .map(GatewayType::get)
+                .filter(GatewayType::isKubernetesApplicationMode)
+                .map(GatewayType::getLongValue)
+                .findFirst()
+                .orElse(null);
+    }
+
+    private static String getDiscoverJobName(JobInfoDetail jobInfoDetail) {
+        return Stream.of(
+                        Optional.ofNullable(jobInfoDetail).map(JobInfoDetail::getHistory).map(History::getJobName),
+                        Optional.ofNullable(jobInfoDetail)
+                                .map(JobInfoDetail::getInstance)
+                                .map(JobInstance::getName),
+                        Optional.ofNullable(jobInfoDetail)
+                                .map(JobInfoDetail::getJobDataDto)
+                                .map(JobDataDto::getCluster)
+                                .map(ClusterInstanceMapping::getName))
+                .filter(Optional::isPresent)
+                .map(Optional::get)
+                .filter(StrUtil::isNotBlank)
+                .findFirst()
+                .orElse(null);
+    }
+
+    private static Integer getDiscoverTaskId(JobInfoDetail jobInfoDetail) {
+        return Stream.of(
+                        Optional.ofNullable(jobInfoDetail)
+                                .map(JobInfoDetail::getInstance)
+                                .map(JobInstance::getTaskId),
+                        Optional.ofNullable(jobInfoDetail).map(JobInfoDetail::getHistory).map(History::getTaskId),
+                        Optional.ofNullable(jobInfoDetail)
+                                .map(JobInfoDetail::getJobDataDto)
+                                .map(JobDataDto::getCluster)
+                                .map(ClusterInstanceMapping::getTaskId))
+                .filter(Optional::isPresent)
+                .map(Optional::get)
+                .findFirst()
+                .orElse(null);
+    }
+
+    private static Integer getDiscoverClusterConfigurationId(JobInfoDetail jobInfoDetail) {
+        return Stream.of(
+                        Optional.ofNullable(jobInfoDetail)
+                                .map(JobInfoDetail::getHistory)
+                                .map(History::getClusterConfigurationId),
+                        Optional.ofNullable(jobInfoDetail)
+                                .map(JobInfoDetail::getJobDataDto)
+                                .map(JobDataDto::getCluster)
+                                .map(ClusterInstanceMapping::getClusterConfigurationId),
+                        Optional.ofNullable(jobInfoDetail)
+                                .map(JobInfoDetail::getJobDataDto)
+                                .map(JobDataDto::getClusterConfiguration)
+                                .map(ClusterConfigurationMapping::getId),
+                        Optional.ofNullable(jobInfoDetail)
+                                .map(JobInfoDetail::getClusterConfiguration)
+                                .map(ClusterConfigurationDTO::getId))
+                .filter(Optional::isPresent)
+                .map(Optional::get)
+                .findFirst()
+                .orElse(null);
+    }
+
+    /** 历史提交配置保留了作业实际 namespace，避免集群配置后续调整影响旧实例恢复。 */
+    private static String getKubernetesNamespace(JobInfoDetail jobInfoDetail) {
+        String namespace = Optional.ofNullable(jobInfoDetail.getJobDataDto())
+                .map(JobDataDto::getClusterConfiguration)
+                .map(ClusterConfigurationMapping::getConfigJson)
+                .map(config -> config.getKubernetesConfig())
+                .map(config -> config.getConfiguration())
+                .map(config -> config.get(KUBERNETES_NAMESPACE_KEY))
+                .orElse(null);
+        if (StrUtil.isNotBlank(namespace)) {
+            return namespace;
+        }
+        return Optional.ofNullable(jobInfoDetail.getClusterConfiguration())
+                .map(ClusterConfigurationDTO::getConfig)
+                .map(config -> config.getKubernetesConfig())
+                .map(config -> config.getConfiguration())
+                .map(config -> config.get(KUBERNETES_NAMESPACE_KEY))
+                .orElse(null);
+    }
+
+    /** Kubernetes Application 的 REST Service 名称稳定，可在 ClusterIP 变化后作为一次性兜底地址。 */
+    static String buildKubernetesRestServiceAddress(String jobName, String namespace) {
+        if (StrUtil.hasBlank(jobName, namespace)) {
+            return null;
+        }
+        return StrUtil.format("{}-rest.{}:{}", jobName, namespace, FLINK_REST_PORT);
+    }
+
+    /** 兜底发现成功后刷新持久化地址，确保监控、日志和 WebUI 不再访问旧 ClusterIP。 */
+    private void refreshJobManagerAddress(JobInfoDetail jobInfoDetail, String jobManagerHost) {
+        ClusterInstance clusterInstance = jobInfoDetail.getClusterInstance();
+        if (clusterInstance != null && clusterInstance.getId() != null) {
+            clusterInstance.setHosts(jobManagerHost);
+            clusterInstance.setJobManagerHost(jobManagerHost);
+            clusterInstanceService.updateById(clusterInstance);
+        }
+
+        History history = jobInfoDetail.getHistory();
+        if (history != null) {
+            history.setJobManagerAddress(jobManagerHost);
+            historyService.updateById(history);
+        }
     }
 
     /**

@@ -19,6 +19,18 @@
 
 package org.dinky.service.impl;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import org.dinky.data.dto.JobDataDto;
+import org.dinky.data.model.ClusterInstance;
+import org.dinky.data.model.ext.JobInfoDetail;
+import org.dinky.data.model.job.History;
+import org.dinky.data.model.job.JobInstance;
+import org.dinky.data.model.mapping.ClusterInstanceMapping;
+
 import java.util.Arrays;
 import java.util.Optional;
 
@@ -26,10 +38,6 @@ import org.junit.jupiter.api.Test;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JobInstanceServiceImplTest {
 
@@ -85,6 +93,76 @@ class JobInstanceServiceImplTest {
                 "pf-oneid-agent-relation");
 
         assertFalse(result.isPresent());
+    }
+
+    /** 当前集群实例丢失时，历史提交模式仍能证明该实例支持主动发现。 */
+    @Test
+    void shouldAllowDiscoveryByHistoryTypeWhenClusterInstanceMissing() {
+        JobInfoDetail jobInfoDetail = new JobInfoDetail(1);
+        History history = new History();
+        history.setType("kubernetes-application");
+        jobInfoDetail.setHistory(history);
+
+        assertTrue(JobInstanceServiceImpl.isDiscoverableKubernetesApplication(jobInfoDetail));
+    }
+
+    /** JobManager 地址优先取当前实例，缺失时回退到历史快照，最后再使用 History 记录。 */
+    @Test
+    void shouldResolveDiscoverHostFromHistorySnapshot() {
+        JobInfoDetail jobInfoDetail = new JobInfoDetail(1);
+        ClusterInstance clusterInstance = new ClusterInstance();
+        clusterInstance.setJobManagerHost("");
+        jobInfoDetail.setClusterInstance(clusterInstance);
+        ClusterInstanceMapping clusterSnapshot = new ClusterInstanceMapping();
+        clusterSnapshot.setJobManagerHost("attribute-user-id-01-rest.flink-dev:8081");
+        jobInfoDetail.setJobDataDto(JobDataDto.builder().cluster(clusterSnapshot).build());
+        History history = new History();
+        history.setJobManagerAddress("history-address:8081");
+        jobInfoDetail.setHistory(history);
+
+        assertEquals(
+                "attribute-user-id-01-rest.flink-dev:8081",
+                JobInstanceServiceImpl.getDiscoverJobManagerHost(jobInfoDetail));
+    }
+
+    /** 注册集群被清理后，历史地址可补成运行时实例，供发现后的强制刷新继续访问 Flink REST。 */
+    @Test
+    void shouldBuildRuntimeClusterInstanceFromHistoryWhenClusterInstanceMissing() {
+        JobInfoDetail jobInfoDetail = new JobInfoDetail(166);
+        JobInstance jobInstance = new JobInstance();
+        jobInstance.setName("derived-event-realtime-engine");
+        jobInstance.setTaskId(31);
+        jobInfoDetail.setInstance(jobInstance);
+        History history = new History();
+        history.setType("kubernetes-application");
+        history.setJobName("derived-event-realtime-engine");
+        history.setJobManagerAddress("derived-event-realtime-engine-rest.flink-dev:8081");
+        history.setClusterConfigurationId(1);
+        jobInfoDetail.setHistory(history);
+
+        ClusterInstance clusterInstance = JobInstanceServiceImpl.buildDiscoverClusterInstance(jobInfoDetail);
+
+        assertEquals("derived-event-realtime-engine", clusterInstance.getName());
+        assertEquals("kubernetes-application", clusterInstance.getType());
+        assertEquals("derived-event-realtime-engine-rest.flink-dev:8081", clusterInstance.getJobManagerHost());
+        assertTrue(clusterInstance.isAutoRegisters());
+        assertEquals(31, clusterInstance.getTaskId());
+        assertEquals(1, clusterInstance.getClusterConfigurationId());
+    }
+
+    /** 缩容重建导致 ClusterIP 变化时，使用稳定的作业名和 namespace 定位 REST Service。 */
+    @Test
+    void shouldBuildKubernetesRestServiceAddress() {
+        assertEquals(
+                "attribute-user-id-01-rest.flink-dev:8081",
+                JobInstanceServiceImpl.buildKubernetesRestServiceAddress("attribute-user-id-01", "flink-dev"));
+    }
+
+    /** 缺少作业名或 namespace 时不能猜测 Service，继续沿用未发现结果。 */
+    @Test
+    void shouldNotBuildKubernetesRestServiceAddressWithoutRequiredName() {
+        assertNull(JobInstanceServiceImpl.buildKubernetesRestServiceAddress("", "flink-dev"));
+        assertNull(JobInstanceServiceImpl.buildKubernetesRestServiceAddress("attribute-user-id-01", null));
     }
 
     private JsonNode job(String jid, String name, String state, long startTime) throws Exception {
