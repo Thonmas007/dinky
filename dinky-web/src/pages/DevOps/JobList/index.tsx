@@ -43,7 +43,7 @@ import {
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import { ProCard, ProTable } from '@ant-design/pro-components';
 import { connect, useModel } from '@umijs/max';
-import { Button, Col, Empty, Flex, Radio, Splitter, Table, Tree } from 'antd';
+import { Button, Col, Empty, Flex, Radio, Select, Splitter, Table, Tree } from 'antd';
 import Search from 'antd/es/input/Search';
 import { Key, useContext, useEffect, useRef, useState } from 'react';
 import { history } from 'umi';
@@ -80,6 +80,20 @@ const JobList = (props: connect) => {
     subscribeTopic: model.subscribeTopic
   }));
   const [currentRunningTaskIds, setCurrentRunningTaskIds] = useState([]);
+  const jobStatusOptions = [
+    { label: l('global.job.status.initiating'), value: JOB_STATUS.INITIALIZING },
+    { label: l('global.job.status.created'), value: JOB_STATUS.CREATED },
+    { label: l('global.job.status.running'), value: JOB_STATUS.RUNNING },
+    { label: l('global.job.status.failing'), value: JOB_STATUS.FAILING },
+    { label: l('global.job.status.failed'), value: JOB_STATUS.FAILED },
+    { label: l('global.job.status.cancelling'), value: JOB_STATUS.CANCELLING },
+    { label: l('global.job.status.canceled'), value: JOB_STATUS.CANCELED },
+    { label: l('global.job.status.finished'), value: JOB_STATUS.FINISHED },
+    { label: l('global.job.status.restarting'), value: JOB_STATUS.RESTARTING },
+    { label: l('global.job.status.suspended'), value: JOB_STATUS.SUSPENDED },
+    { label: l('global.job.status.reconnecting'), value: JOB_STATUS.RECONNECTING },
+    { label: l('global.job.status.unknown'), value: JOB_STATUS.UNKNOWN }
+  ];
 
   useEffect(() => {
     return subscribeTopic(Topic.TASK_RUN_INSTANCE, ['RunningTaskId'], (data: WsData) => {
@@ -322,6 +336,14 @@ const JobList = (props: connect) => {
                   search: { onSearch: (value: string) => setTaskFilter(value) },
                   filter: (
                     <>
+                      <Select
+                        allowClear
+                        placeholder={l('global.table.status')}
+                        value={statusFilter}
+                        options={jobStatusOptions}
+                        style={{ width: 160 }}
+                        onChange={(value) => setStatusFilter(value)}
+                      />
                       <Radio.Group
                         defaultValue={undefined}
                         onChange={(e) => setStepFilter(e.target.value)}
