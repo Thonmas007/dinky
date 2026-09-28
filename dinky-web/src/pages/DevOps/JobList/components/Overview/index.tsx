@@ -46,81 +46,90 @@ const JobOverview = (props: any) => {
   const statusCount = data as StatusCountOverView;
 
   return (
-    <Row gutter={[16, 8]}>
-      <Col span={5} xs={24} xxl={5}>
-        <ProCard colSpan={'20%'} boxShadow={true}>
+    <Row gutter={[8, 8]}>
+      <Col span={24}>
+        {/* 总计与各状态共用一行，压缩统计区高度，为任务列表保留更多空间。 */}
+        <ProCard
+          layout='center'
+          boxShadow={true}
+          style={{ width: '100%' }}
+          bodyStyle={{ padding: 8 }}
+        >
           <StatisticsCard
+            compact
             title={l('devops.joblist.status.all')}
             value={statusCount?.all}
-            icon={<AllJobIcons size={60} />}
-            divider={false}
+            icon={<AllJobIcons size={42} />}
+            divider={true}
             atClick={() => {
               setStatusFilter(undefined);
             }}
             extra={
-              <Space direction='vertical'>
-                <Button type={'text'} icon={<BatchIcons size={20} />}>
+              <Space direction='vertical' size={0} align='start'>
+                <Button size='small' type='text' icon={<BatchIcons size={16} />}>
                   {l('home.job.batch')}: {statusCount?.modelOverview?.batchJobCount}
                 </Button>
-                <Button type={'text'} icon={<SteamIcons size={20} />}>
+                <Button size='small' type='text' icon={<SteamIcons size={16} />}>
                   {l('home.job.stream')}: {statusCount?.modelOverview?.streamingJobCount}
                 </Button>
               </Space>
             }
           />
-        </ProCard>
-      </Col>
-      <Col span={19} xs={24} xxl={19}>
-        <ProCard layout='center' boxShadow={true}>
           <StatisticsCard
+            compact
             title={l('devops.joblist.status.running')}
             value={statusCount?.running}
-            icon={<RunningIcons size={60} />}
+            icon={<RunningIcons size={42} />}
             atClick={() => {
               setStatusFilter(JOB_STATUS.RUNNING);
             }}
             isChecked={statusFilter === JOB_STATUS.RUNNING}
           />
           <StatisticsCard
+            compact
             title={l('devops.joblist.status.cancelled')}
             value={statusCount?.canceled}
-            icon={<CancelIcons size={60} />}
+            icon={<CancelIcons size={42} />}
             atClick={() => {
               setStatusFilter(JOB_STATUS.CANCELED);
             }}
             isChecked={statusFilter === JOB_STATUS.CANCELED}
           />
           <StatisticsCard
+            compact
             title={l('devops.joblist.status.failed')}
             value={statusCount?.failed}
-            icon={<ErrorIcons size={60} />}
+            icon={<ErrorIcons size={42} />}
             atClick={() => {
               setStatusFilter(JOB_STATUS.FAILED);
             }}
             isChecked={statusFilter === JOB_STATUS.FAILED}
           />
           <StatisticsCard
+            compact
             title={l('devops.joblist.status.restarting')}
             value={statusCount?.restarting}
-            icon={<RestartIcons size={60} />}
+            icon={<RestartIcons size={42} />}
             atClick={() => {
               setStatusFilter(JOB_STATUS.RESTARTING);
             }}
             isChecked={statusFilter === JOB_STATUS.RESTARTING}
           />
           <StatisticsCard
+            compact
             title={l('devops.joblist.status.finished')}
             value={statusCount?.finished}
-            icon={<FinishIcons size={60} />}
+            icon={<FinishIcons size={42} />}
             atClick={() => {
               setStatusFilter(JOB_STATUS.FINISHED);
             }}
             isChecked={statusFilter === JOB_STATUS.FINISHED}
           />
           <StatisticsCard
+            compact
             title={l('devops.joblist.status.unknown')}
             value={statusCount?.unknown}
-            icon={<UnknownIcons size={60} />}
+            icon={<UnknownIcons size={42} />}
             divider={false}
             atClick={() => {
               setStatusFilter(JOB_STATUS.UNKNOWN);

@@ -250,7 +250,8 @@ const JobList = (props: connect) => {
       boxShadow
       size={'small'}
       bodyStyle={{
-        height: parent.innerHeight - 235,
+        // 统计区已合并为单行，减少预留扣除值，避免任务列表底部出现空白。
+        height: parent.innerHeight - 135,
         overflow: 'auto',
         width: '99vw'
       }}

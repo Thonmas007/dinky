@@ -31,6 +31,7 @@ type StatisticsCardParams = {
   divider?: boolean;
   atClick?: () => void;
   isChecked?: boolean; // 是否选中
+  compact?: boolean; // 运维作业统计条使用紧凑尺寸，减少对任务列表的占用
 };
 const StatisticsCard = (props: StatisticsCardParams) => {
   const {
@@ -41,22 +42,32 @@ const StatisticsCard = (props: StatisticsCardParams) => {
     extra = <></>,
     divider = true,
     link,
-    atClick
+    atClick,
+    compact = false
   } = props;
   return (
     <>
       <ProCard
         // checked={isChecked}
+        style={compact ? { flex: 1, minWidth: 0 } : undefined}
+        bodyStyle={compact ? { padding: '8px 10px' } : undefined}
         boxShadow={isChecked}
         layout={'center'}
         onClick={() => (atClick ? atClick() : {})}
         hoverable={true}
       >
-        <Space size={20}>
+        <Space size={compact ? 10 : 20}>
           {icon}
-          <Space direction='vertical'>
-            <Text ellipsis={true}>{title}</Text>
-            <Text style={{ fontSize: 30 }}>{value}</Text>
+          <Space direction='vertical' size={compact ? 0 : undefined}>
+            <Text
+              ellipsis={true}
+              style={compact ? { fontSize: 14, lineHeight: '20px' } : undefined}
+            >
+              {title}
+            </Text>
+            <Text style={{ fontSize: compact ? 24 : 30, lineHeight: compact ? '28px' : undefined }}>
+              {value}
+            </Text>
           </Space>
           {extra}
         </Space>
