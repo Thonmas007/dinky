@@ -252,7 +252,7 @@ const JobList = (props: connect) => {
       bodyStyle={{
         // 统计区已合并为单行，减少预留扣除值，避免任务列表底部出现空白。
         height: parent.innerHeight - 135,
-        overflow: 'auto',
+        overflow: 'hidden',
         width: '99vw'
       }}
     >
@@ -321,6 +321,8 @@ const JobList = (props: connect) => {
               <ProTable<Jobs.JobInstance>
                 {...PROTABLE_OPTIONS_PUBLIC}
                 search={false}
+                // 固定明细表体高度，让行内容在表体内滚动，分页始终保持可见。
+                scroll={{ y: parent.innerHeight - 395 }}
                 loading={{ delay: 1000 }}
                 rowKey={(record) => record.id}
                 columns={jobListColumns}
@@ -386,7 +388,6 @@ const JobList = (props: connect) => {
                     />
                   )
                 }}
-                // scroll={{y: parent.innerHeight - 245 - 150}}
               />
             </Col>
           </Flex>
