@@ -89,6 +89,8 @@ export enum API_CONSTANTS {
   CLUSTER_INSTANCE_HEARTBEATS = '/api/cluster/heartbeats',
   CLUSTER_CONFIGURATION_START = '/api/cluster/deploySessionClusterInstance',
   CLUSTER_INSTANCE_SESSION = '/api/cluster/listSessionEnable',
+  KUBERNETES_COMMAND_EXECUTE = '/api/kubernetes/execute',
+  KUBERNETES_COMMAND_CONFIGURATIONS = '/api/kubernetes/configurations',
 
   // ------------------------------------ cluster configuration ------------------------------------
   CLUSTER_CONFIGURATION = '/api/clusterConfiguration/list',

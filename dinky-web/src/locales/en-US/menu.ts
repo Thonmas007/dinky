@@ -56,6 +56,7 @@ export default {
   'menu.registration.cluster': 'Cluster',
   'menu.registration.cluster.cluster-instance': 'Flink Instance',
   'menu.registration.cluster.cluster-config': 'Cluster Config',
+  'menu.registration.cluster.kubernetes-command': 'Kubernetes Query',
   'menu.registration.jar': 'Jar',
   'menu.registration.datasource': 'Data Source',
   'menu.registration.datasource.list': 'Data Source List',

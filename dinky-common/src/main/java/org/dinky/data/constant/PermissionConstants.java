@@ -96,6 +96,9 @@ public class PermissionConstants {
     // killCluster
     public static final String REGISTRATION_CLUSTER_INSTANCE_KILL = "registration:cluster:instance:kill";
 
+    /** 集群查询仅允许执行只读 Kubernetes 命令。 */
+    public static final String REGISTRATION_CLUSTER_KUBERNETES_COMMAND = "registration:cluster:kubernetes-command";
+
     /**
      * data source
      */

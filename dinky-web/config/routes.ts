@@ -118,6 +118,11 @@ export default [
             path: '/registration/cluster/config',
             name: 'cluster-config',
             component: './RegCenter/Cluster/Configuration'
+          },
+          {
+            path: '/registration/cluster/kubernetes-command',
+            name: 'kubernetes-command',
+            component: './RegCenter/Cluster/KubernetesCommand'
           }
         ]
       },

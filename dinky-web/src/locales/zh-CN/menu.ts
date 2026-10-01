@@ -56,6 +56,7 @@ export default {
   'menu.registration.cluster': '集群',
   'menu.registration.cluster.cluster-instance': 'Flink 实例',
   'menu.registration.cluster.cluster-config': '集群配置',
+  'menu.registration.cluster.kubernetes-command': 'K8s 查询',
   'menu.registration.jar': 'Jar',
   'menu.registration.datasource': '数据源',
   'menu.registration.datasource.list': '数据源列表',
