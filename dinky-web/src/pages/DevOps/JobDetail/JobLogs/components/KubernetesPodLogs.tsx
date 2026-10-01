@@ -36,7 +36,7 @@ import {
   message
 } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 type CommandResult = {
   output: string;
@@ -65,10 +65,32 @@ const getJobNamespace = (jobDetail: JobProps['jobDetail']) => {
   );
 };
 
+/** 从作业详情提取 Kubernetes Application 可能使用的名称，兼容历史实例和 Flink REST 快照。 */
+const getJobPodNameHints = (jobDetail: JobProps['jobDetail']) => {
+  const jobData = (jobDetail?.jobDataDto ?? {}) as any;
+  const config = (jobData?.config ?? {}) as any;
+  return [
+    jobDetail?.instance?.name,
+    jobDetail?.history?.jobName,
+    jobData?.job?.name,
+    config?.name,
+    config?.jobName
+  ].filter((name): name is string => typeof name === 'string' && name.trim().length > 0);
+};
+
+/** Pod 名称通常以 Kubernetes Application 的作业名开头，避免误选同 namespace 的其他作业。 */
+const findMatchingPod = (pods: string[], jobNameHints: string[]) => {
+  const normalizedHints = jobNameHints.map((name) => name.trim()).filter(Boolean);
+  return normalizedHints
+    .map((hint) => pods.find((pod) => pod === hint || pod.startsWith(`${hint}-`)))
+    .find(Boolean);
+};
+
 /** 通过现有只读 kubectl 接口列出作业 namespace 下的 Pod，避免用户离开作业详情页排查失败日志。 */
 const KubernetesPodLogs = ({ jobDetail }: JobProps) => {
   const clusterConfigurationId = getJobClusterConfigurationId(jobDetail);
   const initialNamespace = useMemo(() => getJobNamespace(jobDetail), [jobDetail]);
+  const jobNameHints = useMemo(() => getJobPodNameHints(jobDetail), [jobDetail]);
   const [namespace, setNamespace] = useState(initialNamespace);
   const [pods, setPods] = useState<string[]>([]);
   const [selectedPod, setSelectedPod] = useState<string>();
@@ -79,51 +101,70 @@ const KubernetesPodLogs = ({ jobDetail }: JobProps) => {
   const [loadingPods, setLoadingPods] = useState(false);
   const [loadingLogs, setLoadingLogs] = useState(false);
 
-  useEffect(() => {
-    setNamespace(initialNamespace);
-  }, [initialNamespace]);
+  const execute = useCallback(
+    async (command: string) => {
+      if (!clusterConfigurationId) {
+        message.warning('当前作业没有关联 Kubernetes 集群配置');
+        return undefined;
+      }
+      const response = await postAll(API_CONSTANTS.KUBERNETES_COMMAND_EXECUTE, {
+        clusterConfigurationId,
+        command
+      });
+      if (response?.code !== 0) {
+        message.error(response?.msg || 'kubectl 命令执行失败');
+        return undefined;
+      }
+      return response.data as CommandResult;
+    },
+    [clusterConfigurationId]
+  );
 
-  const execute = async (command: string) => {
-    if (!clusterConfigurationId) {
-      message.warning('当前作业没有关联 Kubernetes 集群配置');
-      return undefined;
-    }
-    const response = await postAll(API_CONSTANTS.KUBERNETES_COMMAND_EXECUTE, {
-      clusterConfigurationId,
-      command
-    });
-    if (response?.code !== 0) {
-      message.error(response?.msg || 'kubectl 命令执行失败');
-      return undefined;
-    }
-    return response.data as CommandResult;
-  };
-
-  /** 刷新 Pod 列表并保留合法的当前选择，便于任务重启后快速切换到新 Pod。 */
-  const loadPods = async () => {
-    const trimmedNamespace = namespace.trim();
-    if (!isKubernetesName(trimmedNamespace)) {
-      message.warning('请输入合法的 Kubernetes namespace');
-      return;
-    }
-    setLoadingPods(true);
-    try {
-      const result = await execute(`kubectl get pods -n ${trimmedNamespace} -o name`);
-      if (!result) {
+  /** 刷新 Pod 列表并优先选中当前作业，避免同 namespace 多个作业时误看其他任务日志。 */
+  const loadPods = useCallback(
+    async (targetNamespace: string) => {
+      const trimmedNamespace = targetNamespace.trim();
+      if (!isKubernetesName(trimmedNamespace)) {
+        message.warning('请输入合法的 Kubernetes namespace');
         return;
       }
-      setListResult(result);
-      const nextPods = (result.output || '')
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter((line) => line.startsWith('pod/'))
-        .map((line) => line.slice('pod/'.length));
-      setPods(nextPods);
-      setSelectedPod((current) => (current && nextPods.includes(current) ? current : nextPods[0]));
-    } finally {
-      setLoadingPods(false);
+      setLoadingPods(true);
+      try {
+        const result = await execute(`kubectl get pods -n ${trimmedNamespace} -o name`);
+        if (!result) {
+          return;
+        }
+        setListResult(result);
+        const nextPods = (result.output || '')
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => line.startsWith('pod/'))
+          .map((line) => line.slice('pod/'.length));
+        setPods(nextPods);
+        const matchedPod = findMatchingPod(nextPods, jobNameHints);
+        setSelectedPod((current) => {
+          if (matchedPod) {
+            return matchedPod;
+          }
+          if (current && nextPods.includes(current) && findMatchingPod([current], jobNameHints)) {
+            return current;
+          }
+          return nextPods.length === 1 ? nextPods[0] : undefined;
+        });
+      } finally {
+        setLoadingPods(false);
+      }
+    },
+    [execute, jobNameHints]
+  );
+
+  // 进入页签或切换作业后自动刷新，确保下拉框匹配当前作业的最新 Pod。
+  useEffect(() => {
+    setNamespace(initialNamespace);
+    if (clusterConfigurationId && initialNamespace) {
+      void loadPods(initialNamespace);
     }
-  };
+  }, [clusterConfigurationId, initialNamespace, loadPods]);
 
   /** 读取选中 Pod 的最近日志；previous 用于容器重启后定位上一次失败原因。 */
   const loadLogs = async () => {
@@ -167,7 +208,7 @@ const KubernetesPodLogs = ({ jobDetail }: JobProps) => {
             type='primary'
             icon={<ReloadOutlined />}
             loading={loadingPods}
-            onClick={() => void loadPods()}
+            onClick={() => void loadPods(namespace)}
           >
             刷新 Pod
           </Button>
@@ -209,6 +250,14 @@ const KubernetesPodLogs = ({ jobDetail }: JobProps) => {
             showIcon
             message='当前 namespace 没有 Pod'
             description='如果失败任务的 Pod 已被 Kubernetes 清理，kubectl 无法恢复已删除 Pod 的日志，请改查集群日志平台或保留策略。'
+          />
+        )}
+        {listResult?.exitCode === 0 && pods.length > 1 && !selectedPod && (
+          <Alert
+            type='info'
+            showIcon
+            message='未找到当前作业对应的 Pod'
+            description='请手动选择 Pod；任务名称与 Pod 名称不一致时，系统不会默认选择其他作业。'
           />
         )}
         <Card title={selectedPod || '请选择 Pod'} bordered={false}>
