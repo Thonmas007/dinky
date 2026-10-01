@@ -20,6 +20,7 @@
 import { JobProps } from '@/pages/DevOps/JobDetail/data';
 import ExceptionTab from '@/pages/DevOps/JobDetail/JobLogs/components/ExceptionTab';
 import JobManagerLogsTab from '@/pages/DevOps/JobDetail/JobLogs/components/JobManagerLogsTab';
+import KubernetesPodLogs from '@/pages/DevOps/JobDetail/JobLogs/components/KubernetesPodLogs';
 import TaskManagerLogsTab from '@/pages/DevOps/JobDetail/JobLogs/components/TaskManagerLogsTab';
 import { ProCard } from '@ant-design/pro-components';
 import { useState } from 'react';
@@ -45,6 +46,11 @@ const JobLogsTab = (props: JobProps) => {
       label: 'TaskManager',
       key: 'TaskManager',
       children: <TaskManagerLogsTab jobDetail={jobDetail} />
+    },
+    {
+      label: 'Pod 日志',
+      key: 'KubernetesPod',
+      children: <KubernetesPodLogs jobDetail={jobDetail} />
     }
   ];
 
