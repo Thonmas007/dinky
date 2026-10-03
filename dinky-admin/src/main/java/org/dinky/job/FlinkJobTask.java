@@ -28,8 +28,8 @@ import org.dinky.data.dto.TaskDTO;
 import org.dinky.data.enums.GatewayType;
 import org.dinky.data.enums.JobStatus;
 import org.dinky.data.enums.TaskMonitorScanStatus;
-import org.dinky.data.model.Task;
 import org.dinky.data.model.SystemConfiguration;
+import org.dinky.data.model.Task;
 import org.dinky.data.model.ext.JobInfoDetail;
 import org.dinky.data.model.job.JobInstance;
 import org.dinky.job.handler.JobAlertHandler;
@@ -122,13 +122,45 @@ public class FlinkJobTask implements DaemonTask {
      * @return Returns true if the job has completed, otherwise returns false
      */
     @Override
-    public boolean dealTask() {
+    // 队列轮询可能由多个工作线程取到同一对象，刷新与重试计数必须串行维护。
+    public synchronized boolean dealTask() {
+        // 同一任务重新提交后，旧实例不得继续重发现并抢回任务绑定，也不再产生终态告警。
+        if (isKubernetesApplicationJob()) {
+            JobInstance latestSubmission = jobInstanceService.getJobInstanceByTaskId(
+                    jobInfoDetail.getInstance().getTaskId());
+            if (latestSubmission == null
+                    || !Objects.equals(
+                            latestSubmission.getId(),
+                            jobInfoDetail.getInstance().getId())) {
+                return true;
+            }
+        }
         volatilityBalance();
         if (isWaitingForMonitorScanRetry()) {
             return false;
         }
 
-        boolean canceledBeforeRefresh = JobStatus.CANCELED.getValue().equals(jobInfoDetail.getInstance().getStatus());
+        // 旧版本留下错绑时先恢复最新实例的归属；失败沿用有界重试，人工停止仍禁止自动恢复。
+        if (isKubernetesApplicationJob()) {
+            TaskDTO currentTask =
+                    taskService.getTaskInfoById(jobInfoDetail.getInstance().getTaskId());
+            if (currentTask == null) {
+                return true;
+            }
+            if (!Objects.equals(
+                    currentTask.getJobInstanceId(), jobInfoDetail.getInstance().getId())) {
+                if (!isAutomaticRecoveryEnabled()) {
+                    return true;
+                }
+                if (!tryDiscoverJobId()) {
+                    return handleMonitorScanRetry(JobStatus.CANCELED.equalVal(
+                            jobInfoDetail.getInstance().getStatus()));
+                }
+            }
+        }
+
+        boolean canceledBeforeRefresh =
+                JobStatus.CANCELED.getValue().equals(jobInfoDetail.getInstance().getStatus());
         boolean isDone = JobRefreshHandler.refreshJob(jobInfoDetail, isNeedSave());
         if (shouldRetryMonitorScan(isDone, canceledBeforeRefresh)) {
             if (isMonitorScanActive() && tryDiscoverJobId()) {
@@ -183,8 +215,7 @@ public class FlinkJobTask implements DaemonTask {
             return false;
         }
         String status = jobInfoDetail.getInstance().getStatus();
-        if ((canceledBeforeRefresh || JobStatus.CANCELED.getValue().equals(status))
-                && !isAutomaticRecoveryEnabled()) {
+        if ((canceledBeforeRefresh || JobStatus.CANCELED.getValue().equals(status)) && !isAutomaticRecoveryEnabled()) {
             return false;
         }
         if (JobStatus.CANCELED.getValue().equals(status)) {
@@ -204,7 +235,9 @@ public class FlinkJobTask implements DaemonTask {
     private boolean handleMonitorScanRetry(boolean canceledBeforeRefresh) {
         if (!isMonitorScanActive()) {
             canceledRecoveryScan = canceledBeforeRefresh
-                    || JobStatus.CANCELED.getValue().equals(jobInfoDetail.getInstance().getStatus());
+                    || JobStatus.CANCELED
+                            .getValue()
+                            .equals(jobInfoDetail.getInstance().getStatus());
             markTaskMonitorScanStatus(TaskMonitorScanStatus.SCANNING);
             keepJobReconnecting();
             lastMonitorScanTime = System.currentTimeMillis();
@@ -369,10 +402,12 @@ public class FlinkJobTask implements DaemonTask {
         Task task = new Task();
         task.setId(jobInfoDetail.getInstance().getTaskId());
         task.setMonitorScanStatus(status.getValue());
-        if (TaskMonitorScanStatus.SCANNING == status || TaskMonitorScanStatus.SUCCESS == status) {
-            task.setJobInstanceId(jobInfoDetail.getInstance().getId());
-        }
-        taskService.updateById(task);
+        // 仅更新仍属于本实例的扫描状态，旧线程不能在新提交完成后抢回绑定。
+        taskService.update(
+                task,
+                new LambdaUpdateWrapper<Task>()
+                        .eq(Task::getId, task.getId())
+                        .eq(Task::getJobInstanceId, jobInfoDetail.getInstance().getId()));
     }
 
     /**

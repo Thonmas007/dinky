@@ -73,9 +73,9 @@ import java.util.stream.Stream;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -96,11 +96,7 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
         implements JobInstanceService {
 
     private static final Set<JobStatus> DISCOVERABLE_JOB_STATUSES = Collections.unmodifiableSet(EnumSet.of(
-            JobStatus.INITIALIZING,
-            JobStatus.CREATED,
-            JobStatus.RUNNING,
-            JobStatus.RESTARTING,
-            JobStatus.RECONCILING));
+            JobStatus.INITIALIZING, JobStatus.CREATED, JobStatus.RUNNING, JobStatus.RESTARTING, JobStatus.RECONCILING));
     private static final String KUBERNETES_NAMESPACE_KEY = "kubernetes.namespace";
     private static final int FLINK_REST_PORT = 8081;
     private static final int FAILED_APPLICATION_CLEANUP_MAX_ATTEMPTS = 3;
@@ -348,20 +344,19 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
 
     /** 同一作业也使用刷新版本约束写入，避免迟到请求覆盖主动恢复结果。 */
     @Override
-    public boolean updateIfCurrentJobId(JobInstance jobInstance, String expectedJobId, LocalDateTime expectedUpdateTime) {
+    public boolean updateIfCurrentJobId(
+            JobInstance jobInstance, String expectedJobId, LocalDateTime expectedUpdateTime) {
         if (jobInstance == null || jobInstance.getId() == null) {
             return false;
         }
-        LambdaUpdateWrapper<JobInstance> updateWrapper = new LambdaUpdateWrapper<JobInstance>()
-                .eq(JobInstance::getId, jobInstance.getId());
+        LambdaUpdateWrapper<JobInstance> updateWrapper =
+                new LambdaUpdateWrapper<JobInstance>().eq(JobInstance::getId, jobInstance.getId());
         if (expectedUpdateTime != null) {
             updateWrapper.eq(JobInstance::getUpdateTime, expectedUpdateTime);
         }
         updateWrapper.and(wrapper -> {
             if (StrUtil.isBlank(expectedJobId)) {
-                wrapper.isNull(JobInstance::getJid)
-                        .or()
-                        .eq(JobInstance::getJid, "");
+                wrapper.isNull(JobInstance::getJid).or().eq(JobInstance::getJid, "");
             } else {
                 wrapper.eq(JobInstance::getJid, expectedJobId);
             }
@@ -378,6 +373,15 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
     public JobInfoDetail discoverJobId(Integer jobInstanceId) {
         JobInfoDetail jobInfoDetail = getJobInfoDetail(jobInstanceId);
         JobInstance jobInstance = jobInfoDetail.getInstance();
+        // 旧版本重发现可能把任务绑定抢回历史实例；提交序号才是当前实例的依据，不能用损坏的绑定拒绝修复。
+        Task currentTask = taskMapper.selectById(jobInstance.getTaskId());
+        JobInstance latestSubmission = getJobInstanceByTaskId(jobInstance.getTaskId());
+        if (currentTask == null
+                || latestSubmission == null
+                || !Objects.equals(latestSubmission.getId(), jobInstanceId)) {
+            log.warn("Skip Job ID discovery for superseded job instance {}", jobInstanceId);
+            return null;
+        }
         if (!isDiscoverableKubernetesApplication(jobInfoDetail)) {
             log.warn("Job ID discovery only supports Kubernetes Application, job instance {}", jobInstanceId);
             return null;
@@ -392,8 +396,8 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
         }
 
         if (!activeJob.isPresent()) {
-            String serviceAddress = buildKubernetesRestServiceAddress(
-                    jobInstance.getName(), getKubernetesNamespace(jobInfoDetail));
+            String serviceAddress =
+                    buildKubernetesRestServiceAddress(jobInstance.getName(), getKubernetesNamespace(jobInfoDetail));
             if (StrUtil.isNotBlank(serviceAddress) && !StrUtil.equals(jobManagerHost, serviceAddress)) {
                 // dev 缩容重建可能改变 Service ClusterIP，旧地址失效时按稳定的作业名和 namespace 再查一次。
                 log.info(
@@ -442,19 +446,21 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
         if (updatedRows == 0) {
             JobInstance latestInstance = getById(jobInstanceId);
             if (latestInstance == null || !StrUtil.equals(newJobId, latestInstance.getJid())) {
-                log.warn(
-                        "Job ID discovery result {} was superseded for job instance {}",
-                        newJobId,
-                        jobInstanceId);
+                log.warn("Job ID discovery result {} was superseded for job instance {}", newJobId, jobInstanceId);
                 return null;
             }
         }
 
-        Task task = new Task();
-        task.setId(jobInstance.getTaskId());
-        task.setJobInstanceId(jobInstanceId);
-        task.setMonitorScanStatus(TaskMonitorScanStatus.SUCCESS.getValue());
-        taskMapper.updateById(task);
+        // REST 查询期间的新提交或人工停止必须胜出；数据库原子校验最新提交和旧绑定后才允许修复。
+        if (taskMapper.recoverLatestJobInstance(
+                        jobInstance.getTaskId(),
+                        jobInstanceId,
+                        currentTask.getJobInstanceId(),
+                        currentTask.getMonitorScanStatus(),
+                        TaskMonitorScanStatus.SUCCESS.getValue())
+                == 0) {
+            throw new IllegalStateException("Job instance was superseded during discovery");
+        }
         log.info(
                 "Discovered and relinked Flink Job ID for instance {}: {} -> {}, status {}",
                 jobInstanceId,
@@ -494,7 +500,8 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
                         Optional.ofNullable(jobInfoDetail.getJobDataDto())
                                 .map(JobDataDto::getClusterConfiguration)
                                 .map(ClusterConfigurationMapping::getType),
-                        Optional.ofNullable(jobInfoDetail.getClusterConfiguration()).map(ClusterConfigurationDTO::getType))
+                        Optional.ofNullable(jobInfoDetail.getClusterConfiguration())
+                                .map(ClusterConfigurationDTO::getType))
                 .filter(Optional::isPresent)
                 .map(Optional::get)
                 .anyMatch(type -> GatewayType.get(type).isKubernetesApplicationMode());
@@ -566,7 +573,9 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
                         Optional.ofNullable(jobInfoDetail)
                                 .map(JobInfoDetail::getClusterInstance)
                                 .map(ClusterInstance::getType),
-                        Optional.ofNullable(jobInfoDetail).map(JobInfoDetail::getHistory).map(History::getType),
+                        Optional.ofNullable(jobInfoDetail)
+                                .map(JobInfoDetail::getHistory)
+                                .map(History::getType),
                         Optional.ofNullable(jobInfoDetail)
                                 .map(JobInfoDetail::getJobDataDto)
                                 .map(JobDataDto::getCluster)
@@ -589,7 +598,9 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
 
     private static String getDiscoverJobName(JobInfoDetail jobInfoDetail) {
         return Stream.of(
-                        Optional.ofNullable(jobInfoDetail).map(JobInfoDetail::getHistory).map(History::getJobName),
+                        Optional.ofNullable(jobInfoDetail)
+                                .map(JobInfoDetail::getHistory)
+                                .map(History::getJobName),
                         Optional.ofNullable(jobInfoDetail)
                                 .map(JobInfoDetail::getInstance)
                                 .map(JobInstance::getName),
@@ -609,7 +620,9 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
                         Optional.ofNullable(jobInfoDetail)
                                 .map(JobInfoDetail::getInstance)
                                 .map(JobInstance::getTaskId),
-                        Optional.ofNullable(jobInfoDetail).map(JobInfoDetail::getHistory).map(History::getTaskId),
+                        Optional.ofNullable(jobInfoDetail)
+                                .map(JobInfoDetail::getHistory)
+                                .map(History::getTaskId),
                         Optional.ofNullable(jobInfoDetail)
                                 .map(JobInfoDetail::getJobDataDto)
                                 .map(JobDataDto::getCluster)
@@ -697,12 +710,14 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
         }
         List<JsonNode> activeJobs = jobs.stream()
                 .filter(Objects::nonNull)
-                .filter(job -> DISCOVERABLE_JOB_STATUSES.contains(JobStatus.get(job.path("state").asText())))
+                .filter(job -> DISCOVERABLE_JOB_STATUSES.contains(
+                        JobStatus.get(job.path("state").asText())))
                 .filter(job -> StrUtil.isNotBlank(job.path("jid").asText()))
                 .collect(Collectors.toList());
         Optional<JsonNode> sameNameJob = activeJobs.stream()
                 .filter(job -> StrUtil.equals(jobName, job.path("name").asText()))
-                .max(Comparator.comparingLong((JsonNode job) -> job.path("start-time").asLong(0L)));
+                .max(Comparator.comparingLong(
+                        (JsonNode job) -> job.path("start-time").asLong(0L)));
         if (sameNameJob.isPresent()) {
             return sameNameJob;
         }
@@ -725,14 +740,16 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
         }
 
         DaemonTaskConfig config = DaemonTaskConfig.build(FlinkJobTask.TYPE, instance.getId(), instance.getTaskId());
-        DaemonTask daemonTask = FlinkJobThreadPool.getInstance().removeByTaskConfig(config);
-        daemonTask = Optional.ofNullable(daemonTask).orElse(DaemonTask.build(config));
+        // 结束回调不抢占已有监控；同 JID 重用或回调迟到时仍由当前 JM 判定状态。
+        if (FlinkJobThreadPool.getInstance().getByTaskConfig(config) != null) {
+            return true;
+        }
+        DaemonTask daemonTask = DaemonTask.build(config);
 
         boolean isDone = daemonTask.dealTask();
         // If the task is not completed, it is re-queued
         if (!isDone) {
-            daemonTask.dealTask();
-            //            FlinkJobThreadPool.getInstance().execute(daemonTask);
+            FlinkJobThreadPool.getInstance().execute(daemonTask);
         }
         return isDone;
     }
@@ -755,14 +772,14 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
         }
 
         DaemonTaskConfig config = DaemonTaskConfig.build(FlinkJobTask.TYPE, instance.getId(), instance.getTaskId());
-        DaemonTask daemonTask = FlinkJobThreadPool.getInstance().removeByTaskConfig(config);
-        daemonTask = Optional.ofNullable(daemonTask).orElse(DaemonTask.build(config));
-
+        // 归档通知可能属于同 JID 的旧运行，不能移除当前实时监控；已有监控自行核对当前 JM。
+        if (FlinkJobThreadPool.getInstance().getByTaskConfig(config) != null) {
+            return true;
+        }
+        DaemonTask daemonTask = DaemonTask.build(config);
         boolean isDone = daemonTask.dealTask();
-        // If the task is not completed, it is re-queued
         if (!isDone) {
-            daemonTask.dealTask();
-            //            FlinkJobThreadPool.getInstance().execute(daemonTask);
+            FlinkJobThreadPool.getInstance().execute(daemonTask);
         }
         return isDone;
     }

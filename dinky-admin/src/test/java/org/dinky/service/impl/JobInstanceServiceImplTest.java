@@ -22,26 +22,147 @@ package org.dinky.service.impl;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 import org.dinky.data.dto.JobDataDto;
 import org.dinky.data.model.ClusterInstance;
+import org.dinky.data.model.Task;
 import org.dinky.data.model.ext.JobInfoDetail;
 import org.dinky.data.model.job.History;
 import org.dinky.data.model.job.JobInstance;
 import org.dinky.data.model.mapping.ClusterInstanceMapping;
+import org.dinky.mapper.JobInstanceMapper;
+import org.dinky.mapper.TaskMapper;
+import org.dinky.service.ClusterConfigurationService;
+import org.dinky.service.ClusterInstanceService;
+import org.dinky.service.HistoryService;
+import org.dinky.service.JobHistoryService;
 
+import org.apache.ibatis.builder.MapperBuilderAssistant;
+
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Optional;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
+import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpServer;
 
 class JobInstanceServiceImplTest {
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
+    /** 复现线上最新实例 51 被错绑到历史实例 41 的场景，实际经过 REST 发现再执行条件恢复。 */
+    @Test
+    void shouldRecoverLatestSubmissionDespiteStaleTaskBinding() throws Exception {
+        recoverWithStaleBinding(1);
+    }
+
+    /** 查询期间新提交或停止导致条件更新失败时必须抛错，使事务回滚而不是宣称恢复成功。 */
+    @Test
+    void shouldRollbackRecoveryWhenOwnershipChangesDuringDiscovery() throws Exception {
+        recoverWithStaleBinding(0);
+    }
+
+    private void recoverWithStaleBinding(int updatedRows) throws Exception {
+        TableInfoHelper.initTableInfo(
+                new MapperBuilderAssistant(new MybatisConfiguration(), "test"), JobInstance.class);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/jobs/overview", exchange -> {
+            byte[] response = ("{\"jobs\":[{\"jid\":\"same-job\",\"name\":\"tag-realtime-engine\","
+                            + "\"state\":\"RUNNING\",\"start-time\":1000}]}")
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        try {
+            TaskMapper taskMapper = mock(TaskMapper.class);
+            JobInstanceMapper instanceMapper = mock(JobInstanceMapper.class);
+            JobInstanceServiceImpl service = spy(new JobInstanceServiceImpl(
+                    mock(HistoryService.class),
+                    mock(ClusterInstanceService.class),
+                    mock(ClusterConfigurationService.class),
+                    mock(JobHistoryService.class),
+                    taskMapper));
+            ReflectionTestUtils.setField(service, "baseMapper", instanceMapper);
+            JobInstance instance = new JobInstance();
+            instance.setId(51);
+            instance.setTaskId(11);
+            instance.setName("tag-realtime-engine");
+            instance.setJid("same-job");
+            instance.setStatus("CANCELED");
+            JobInfoDetail detail = new JobInfoDetail(51);
+            detail.setInstance(instance);
+            ClusterInstance cluster = new ClusterInstance();
+            cluster.setType("kubernetes-application");
+            cluster.setJobManagerHost("127.0.0.1:" + server.getAddress().getPort());
+            detail.setClusterInstance(cluster);
+            Task task = new Task();
+            task.setId(11);
+            task.setJobInstanceId(41);
+            task.setMonitorScanStatus("SCANNING");
+            doReturn(detail).when(service).getJobInfoDetail(51);
+            doReturn(instance).when(service).getJobInstanceByTaskId(11);
+            when(taskMapper.selectById(11)).thenReturn(task);
+            when(instanceMapper.update(eq(null), any())).thenReturn(1);
+            when(taskMapper.recoverLatestJobInstance(11, 51, 41, "SCANNING", "SUCCESS"))
+                    .thenReturn(updatedRows);
+            if (updatedRows == 0) {
+                assertThrows(IllegalStateException.class, () -> service.discoverJobId(51));
+            } else {
+                assertEquals(detail, service.discoverJobId(51));
+            }
+            verify(taskMapper).recoverLatestJobInstance(11, 51, 41, "SCANNING", "SUCCESS");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    /** 旧实例即使仍有可访问的稳定 Service，也不得抢回新提交实例的任务绑定。 */
+    @Test
+    void shouldRejectDiscoveryForSupersededInstance() {
+        TaskMapper taskMapper = mock(TaskMapper.class);
+        ClusterInstanceService clusterService = mock(ClusterInstanceService.class);
+        JobInstanceServiceImpl service = spy(new JobInstanceServiceImpl(
+                mock(HistoryService.class),
+                clusterService,
+                mock(ClusterConfigurationService.class),
+                mock(JobHistoryService.class),
+                taskMapper));
+        JobInstance instance = new JobInstance();
+        instance.setId(55);
+        instance.setTaskId(12);
+        JobInfoDetail detail = new JobInfoDetail(55);
+        detail.setInstance(instance);
+        Task task = new Task();
+        task.setId(12);
+        task.setJobInstanceId(57);
+        doReturn(detail).when(service).getJobInfoDetail(55);
+        when(taskMapper.selectById(12)).thenReturn(task);
+        JobInstance latest = new JobInstance();
+        latest.setId(57);
+        doReturn(latest).when(service).getJobInstanceByTaskId(12);
+
+        assertNull(service.discoverJobId(55));
+        verifyNoInteractions(clusterService);
+    }
 
     /** 驱逐后 overview 可能同时包含历史终态和新运行态，只能选择启动时间最新的活跃同名作业。 */
     @Test
@@ -115,7 +236,8 @@ class JobInstanceServiceImplTest {
         jobInfoDetail.setClusterInstance(clusterInstance);
         ClusterInstanceMapping clusterSnapshot = new ClusterInstanceMapping();
         clusterSnapshot.setJobManagerHost("attribute-user-id-01-rest.flink-dev:8081");
-        jobInfoDetail.setJobDataDto(JobDataDto.builder().cluster(clusterSnapshot).build());
+        jobInfoDetail.setJobDataDto(
+                JobDataDto.builder().cluster(clusterSnapshot).build());
         History history = new History();
         history.setJobManagerAddress("history-address:8081");
         jobInfoDetail.setHistory(history);
@@ -167,10 +289,6 @@ class JobInstanceServiceImplTest {
 
     private JsonNode job(String jid, String name, String state, long startTime) throws Exception {
         return OBJECT_MAPPER.readTree(String.format(
-                "{\"jid\":\"%s\",\"name\":\"%s\",\"state\":\"%s\",\"start-time\":%d}",
-                jid,
-                name,
-                state,
-                startTime));
+                "{\"jid\":\"%s\",\"name\":\"%s\",\"state\":\"%s\",\"start-time\":%d}", jid, name, state, startTime));
     }
 }

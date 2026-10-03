@@ -40,7 +40,6 @@ import org.dinky.data.flink.exceptions.FlinkJobExceptionsDetail;
 import org.dinky.data.flink.job.FlinkJobDetailInfo;
 import org.dinky.data.flink.watermark.FlinkJobNodeWaterMark;
 import org.dinky.data.model.ClusterInstance;
-import org.dinky.data.model.SystemConfiguration;
 import org.dinky.data.model.ext.JobInfoDetail;
 import org.dinky.data.model.job.JobInstance;
 import org.dinky.gateway.Gateway;
@@ -48,7 +47,6 @@ import org.dinky.gateway.config.GatewayConfig;
 import org.dinky.gateway.exception.NotSupportGetStatusException;
 import org.dinky.gateway.kubernetes.KubernetesApplicationGateway;
 import org.dinky.gateway.model.FlinkClusterConfig;
-import org.dinky.init.FlinkHistoryServer;
 import org.dinky.job.JobConfig;
 import org.dinky.service.ClusterInstanceService;
 import org.dinky.service.HistoryService;
@@ -121,6 +119,9 @@ public class JobRefreshHandler {
         String oldStatus = jobInstance.getStatus();
         // 在网络请求前读取版本，主动发现即使没有替换 JID，也会使旧请求失去写入资格。
         JobInstance refreshSnapshot = jobInstanceService.getById(jobInstance.getId());
+        if (refreshSnapshot == null) {
+            return true;
+        }
         LocalDateTime expectedUpdateTime = refreshSnapshot.getUpdateTime();
 
         // Cluster information is missing and cannot be monitored
@@ -232,7 +233,8 @@ public class JobRefreshHandler {
                     // if status is RECONNECTING, ignore it
                     isDone = true;
                 } else {
-                    if (jobInstanceService.updateIfCurrentJobId(jobInstance, jobInstance.getJid(), expectedUpdateTime)) {
+                    if (jobInstanceService.updateIfCurrentJobId(
+                            jobInstance, jobInstance.getJid(), expectedUpdateTime)) {
                         jobHistoryService.updateById(
                                 jobInfoDetail.getJobDataDto().toJobHistory());
                     } else {
@@ -271,13 +273,8 @@ public class JobRefreshHandler {
      * @return {@link org.dinky.data.dto.JobDataDto}.
      */
     public static JobDataDto getJobData(Integer id, String jobManagerHost, String jobId) {
-        if (FlinkHistoryServer.HISTORY_JOBID_SET.contains(jobId)
-                && SystemConfiguration.getInstances().getUseFlinkHistoryServer().getValue()) {
-            jobManagerHost = "127.0.0.1:"
-                    + SystemConfiguration.getInstances()
-                            .getFlinkHistoryServerPort()
-                            .getValue();
-        }
+        // 实时监控只读取当前 JobManager；同一 JID 可被多次提交复用，历史归档不能证明本次运行已结束。
+        // REST 不可达时交给重连/集群轮询处理，历史详情仍从已保存的 JobHistory 展示。
         JobDataDto.JobDataDtoBuilder builder = JobDataDto.builder();
         if (Asserts.isNullString(jobManagerHost)) {
             // 地址为空时直接交给上层重连/主动轮询分支，避免 Flink REST 客户端构造出无意义请求。

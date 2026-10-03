@@ -21,8 +21,10 @@ package org.dinky.controller;
 
 import org.dinky.api.FlinkAPI;
 import org.dinky.assertion.Asserts;
+import org.dinky.daemon.pool.FlinkJobThreadPool;
 import org.dinky.data.annotations.Log;
 import org.dinky.data.enums.BusinessType;
+import org.dinky.data.enums.JobStatus;
 import org.dinky.data.enums.Status;
 import org.dinky.data.model.ID;
 import org.dinky.data.model.devops.TaskManagerConfiguration;
@@ -32,7 +34,6 @@ import org.dinky.data.model.job.JobInstance;
 import org.dinky.data.result.ProTableResult;
 import org.dinky.data.result.Result;
 import org.dinky.data.vo.task.JobInstanceVo;
-import org.dinky.daemon.pool.FlinkJobThreadPool;
 import org.dinky.explainer.lineage.LineageResult;
 import org.dinky.service.JobInstanceService;
 import org.dinky.utils.BuildConfiguration;
@@ -128,7 +129,8 @@ public class JobInstanceController {
     @GetMapping("/getRunningTaskIds")
     @ApiOperation("Get running task ids")
     public Result<Map<String, Set<Integer>>> getRunningTaskIds() {
-        Set<Integer> runningTaskIds = new HashSet<>(FlinkJobThreadPool.getInstance().getCurrentMonitorTaskIds());
+        Set<Integer> runningTaskIds =
+                new HashSet<>(FlinkJobThreadPool.getInstance().getCurrentMonitorTaskIds());
         return Result.succeed(Collections.singletonMap("RunningTaskId", runningTaskIds));
     }
 
@@ -202,15 +204,48 @@ public class JobInstanceController {
             paramType = "query",
             required = true)
     public Result<JobInfoDetail> discoverJobId(@RequestParam Integer id) {
+        JobInstance requested = jobInstanceService.getById(id);
+        if (requested == null) {
+            return Result.failed(Status.JOB_INSTANCE_NOT_EXIST);
+        }
+        JobInstance latest = jobInstanceService.getJobInstanceByTaskId(requested.getTaskId());
+        if (latest != null && !java.util.Objects.equals(latest.getId(), id)) {
+            return Result.failed("当前页面为历史实例，请打开最新作业实例 " + latest.getId() + " 后重新发现");
+        }
         JobInfoDetail discoveredJob = jobInstanceService.discoverJobId(id);
         if (discoveredJob == null) {
             return Result.failed("未发现可唯一识别的运行态 Flink 作业，请确认 JobManager REST 地址和作业状态");
         }
 
         JobInstance jobInstance = discoveredJob.getInstance();
-        JobInfoDetail refreshedJob =
-                jobInstanceService.refreshJobInfoDetail(id, jobInstance.getTaskId(), true);
-        return Result.succeed(refreshedJob, "已发现 Job ID " + jobInstance.getJid() + " 并恢复监控");
+        JobInfoDetail refreshedJob = jobInstanceService.refreshJobInfoDetail(id, jobInstance.getTaskId(), true);
+        // 发现活跃作业不等于详情刷新成功，避免实际仍为终态时返回误导性的恢复提示。
+        if (refreshedJob == null
+                || refreshedJob.getInstance() == null
+                || refreshedJob.getJobDataDto() == null
+                || refreshedJob.getJobDataDto().isError()
+                || refreshedJob.getJobDataDto().getJob() == null
+                || !java.util.Objects.equals(
+                        refreshedJob.getInstance().getJid(),
+                        refreshedJob.getJobDataDto().getJob().getJid())
+                || !java.util.Objects.equals(
+                        refreshedJob.getInstance().getStatus(),
+                        refreshedJob.getJobDataDto().getJob().getState())
+                || JobStatus.isDone(refreshedJob.getInstance().getStatus())
+                // 发现后可能立即进入取消、失败清理或挂起，这些状态不能宣称监控恢复成功。
+                || JobStatus.CANCELLING.equalVal(refreshedJob.getInstance().getStatus())
+                || JobStatus.FAILING.equalVal(refreshedJob.getInstance().getStatus())
+                || JobStatus.SUSPENDED.equalVal(refreshedJob.getInstance().getStatus())
+                || JobStatus.UNKNOWN
+                        .getValue()
+                        .equals(refreshedJob.getInstance().getStatus())
+                || JobStatus.RECONNECTING
+                        .getValue()
+                        .equals(refreshedJob.getInstance().getStatus())) {
+            return Result.failed("已发现 Job ID，但监控刷新未恢复，请检查当前 JobManager 的状态与监控日志");
+        }
+        return Result.succeed(
+                refreshedJob, "已发现 Job ID " + refreshedJob.getInstance().getJid() + " 并恢复监控");
     }
 
     /**

@@ -39,6 +39,14 @@ import com.baomidou.mybatisplus.annotation.InterceptorIgnore;
 @Mapper
 public interface TaskMapper extends SuperMapper<Task> {
 
+    /** 仅在绑定和停止标记未变且无更新提交时修复监控归属，防止历史实例或迟到发现抢占新任务。 */
+    int recoverLatestJobInstance(
+            @Param("taskId") Integer taskId,
+            @Param("instanceId") Integer instanceId,
+            @Param("expectedInstanceId") Integer expectedInstanceId,
+            @Param("expectedScanStatus") String expectedScanStatus,
+            @Param("scanStatus") String scanStatus);
+
     List<Task> queryOnLineTaskByDoneStatus(
             @Param("parentIds") List<Integer> parentIds,
             @Param("stepIds") List<Integer> stepIds,

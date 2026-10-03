@@ -20,6 +20,23 @@
 
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="org.dinky.mapper.TaskMapper">
+    <update id="recoverLatestJobInstance">
+        update dinky_task
+        set job_instance_id = #{instanceId}, monitor_scan_status = #{scanStatus}
+        where id = #{taskId}
+        <choose>
+            <when test="expectedInstanceId != null">and job_instance_id = #{expectedInstanceId}</when>
+            <otherwise>and job_instance_id is null</otherwise>
+        </choose>
+        <choose>
+            <when test="expectedScanStatus != null">and monitor_scan_status = #{expectedScanStatus}</when>
+            <otherwise>and monitor_scan_status is null</otherwise>
+        </choose>
+        and exists (select 1 from dinky_job_instance current_instance
+                    where current_instance.id = #{instanceId} and current_instance.task_id = #{taskId})
+        and not exists (select 1 from dinky_job_instance newer_instance
+                        where newer_instance.task_id = #{taskId} and newer_instance.id > #{instanceId})
+    </update>
     <select id="selectForProTable" resultType="org.dinky.data.model.Task">
         select
         a.*

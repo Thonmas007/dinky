@@ -56,7 +56,7 @@ public class TaskWorker implements Runnable {
                 try {
                     boolean done = daemonTask.dealTask();
                     if (done) {
-                        FlinkJobThreadPool.getInstance().removeByTaskConfig(daemonTask.getConfig());
+                        FlinkJobThreadPool.getInstance().removeCompletedTask(daemonTask);
                     }
                 } catch (Exception e) {
                     log.error(e.getMessage(), e);

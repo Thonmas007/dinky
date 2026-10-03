@@ -85,7 +85,8 @@ public class TaskQueue<T extends DaemonTask> {
 
     public void removeByTask(T task) {
         synchronized (lock) {
-            tasks.remove(task);
+            // 同配置的新监控可能已替换旧对象，旧线程退出只能移除自己。
+            tasks.removeIf(candidate -> candidate == task);
         }
     }
 

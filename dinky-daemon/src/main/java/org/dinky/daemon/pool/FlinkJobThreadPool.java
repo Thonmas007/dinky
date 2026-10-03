@@ -75,6 +75,12 @@ public class FlinkJobThreadPool implements ThreadPool {
         return removed;
     }
 
+    // 按对象身份结束监控，避免迟到的旧线程删除同配置的新监控。
+    public void removeCompletedTask(DaemonTask daemonTask) {
+        queue.removeByTask(daemonTask);
+        resizeWorkers(queue.getTaskSize() / 10);
+    }
+
     private void resizeWorkers(int afterNum) {
         synchronized (lock) {
             int workerNum = this.workerNum.get();
