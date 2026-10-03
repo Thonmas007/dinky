@@ -87,6 +87,7 @@ declare namespace Jobs {
     step: number;
     configJson: {
       'state.savepoints.dir': string;
+      'execution.checkpointing.interval'?: string | number;
     };
     useResult: boolean;
     useChangeLog: boolean;

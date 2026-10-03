@@ -28,15 +28,51 @@ import {
   SyncOutlined
 } from '@ant-design/icons';
 import { Button, Descriptions, Space, Tag } from 'antd';
-import {recoveryCheckPoint} from "@/pages/DevOps/JobDetail/CheckPointsTab/components/functions";
-import {l} from "@/utils/intl";
+import { recoveryCheckPoint } from '@/pages/DevOps/JobDetail/CheckPointsTab/components/functions';
+import { l } from '@/utils/intl';
 
 const CkDesc = (props: JobProps) => {
   const { jobDetail } = props;
 
   const counts = jobDetail?.jobDataDto?.checkpoints?.counts;
-  const latest = jobDetail?.jobDataDto?.checkpoints?.latest;
-  const checkpointsConfigInfo = jobDetail?.jobDataDto?.checkpointsConfig;
+  const checkpoints = jobDetail?.jobDataDto?.checkpoints;
+  const latest = checkpoints?.latest;
+  const checkpointHistory = checkpoints?.history ?? [];
+  const isFinishedJob = ['CANCELED', 'CANCEL', 'FAILED', 'FINISHED', 'SUCCESS', 'UNKNOWN'].includes(
+    jobDetail?.instance?.status
+  );
+  const historyCompleted = checkpointHistory
+    .filter((checkpoint: any) => checkpoint.status === 'COMPLETED' && !checkpoint.is_savepoint)
+    .sort(
+      (left: any, right: any) => (right.trigger_timestamp ?? 0) - (left.trigger_timestamp ?? 0)
+    );
+  const historySavepoints = checkpointHistory
+    .filter((checkpoint: any) => checkpoint.status === 'COMPLETED' && checkpoint.is_savepoint)
+    .sort(
+      (left: any, right: any) => (right.trigger_timestamp ?? 0) - (left.trigger_timestamp ?? 0)
+    );
+  const historyFailed = checkpointHistory
+    .filter((checkpoint: any) => checkpoint.status === 'FAILED')
+    .sort(
+      (left: any, right: any) => (right.trigger_timestamp ?? 0) - (left.trigger_timestamp ?? 0)
+    );
+
+  // 已结束任务的 Flink REST 可能不再返回 latest/config，使用持久化历史补齐展示，运行中实时数据优先。
+  const effectiveLatest = {
+    ...latest,
+    completed: isFinishedJob ? latest?.completed ?? historyCompleted[0] : latest?.completed,
+    savepoint: isFinishedJob ? latest?.savepoint ?? historySavepoints[0] : latest?.savepoint,
+    failed: isFinishedJob ? latest?.failed ?? historyFailed[0] : latest?.failed
+  };
+  const liveCheckpointConfig = jobDetail?.jobDataDto?.checkpointsConfig;
+  const historyConfig = jobDetail?.history?.configJson?.configJson;
+  const checkpointsConfigInfo =
+    !isFinishedJob || liveCheckpointConfig?.mode || liveCheckpointConfig?.interval
+      ? liveCheckpointConfig
+      : {
+          ...liveCheckpointConfig,
+          interval: historyConfig?.['execution.checkpointing.interval']
+        };
 
   return (
     <>
@@ -68,27 +104,30 @@ const CkDesc = (props: JobProps) => {
         <Descriptions.Item label='Latest Restored'>
           <Tag color='green' title={'Latest Completed CheckPoint'}>
             <EllipsisMiddle maxCount={30}>
-              {latest?.restored?.external_path ?? 'None'}
+              {effectiveLatest?.restored?.external_path ?? 'None'}
             </EllipsisMiddle>
           </Tag>
         </Descriptions.Item>
 
         <Descriptions.Item label='Latest Failed CheckPoint'>
           <Tag color='red' title={'Latest Failed CheckPoint'}>
-            id: {latest?.failed?.id ?? 'None'}
+            id: {effectiveLatest?.failed?.id ?? 'None'}
           </Tag>
         </Descriptions.Item>
 
         <Descriptions.Item label='Latest Completed CheckPoint'>
           <Tag color='green' title={'Latest Completed CheckPoint'}>
             <EllipsisMiddle maxCount={30}>
-              {latest?.completed?.external_path ?? 'None'}
+              {effectiveLatest?.completed?.external_path ?? 'None'}
             </EllipsisMiddle>
           </Tag>
-          {latest?.completed?.external_path ? (
+          {effectiveLatest?.completed?.external_path ? (
             <Button
               onClick={() =>
-                recoveryCheckPoint(jobDetail?.instance?.taskId, latest?.completed?.external_path)
+                recoveryCheckPoint(
+                  jobDetail?.instance?.taskId,
+                  effectiveLatest.completed.external_path
+                )
               }
             >
               {l('devops.jobinfo.ck.recovery.recoveryTo')}
@@ -104,7 +143,7 @@ const CkDesc = (props: JobProps) => {
         <Descriptions.Item label='Latest Savepoint'>
           <Tag color='purple' title={'Latest Savepoint'}>
             <EllipsisMiddle maxCount={30}>
-              {latest?.savepoint?.external_path ?? 'None'}
+              {effectiveLatest?.savepoint?.external_path ?? 'None'}
             </EllipsisMiddle>
           </Tag>
         </Descriptions.Item>
