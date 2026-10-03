@@ -24,6 +24,7 @@ import org.dinky.context.SpringContextUtils;
 import org.dinky.daemon.constant.FlinkTaskConstant;
 import org.dinky.daemon.task.DaemonTask;
 import org.dinky.daemon.task.DaemonTaskConfig;
+import org.dinky.data.dto.TaskDTO;
 import org.dinky.data.enums.GatewayType;
 import org.dinky.data.enums.JobStatus;
 import org.dinky.data.enums.TaskMonitorScanStatus;
@@ -77,6 +78,9 @@ public class FlinkJobTask implements DaemonTask {
 
     private long lastMonitorScanTime = 0L;
 
+    /** 标记本轮重扫是否由外部 CANCELED 触发，耗尽后保持原终态而不是误报 UNKNOWN。 */
+    private boolean canceledRecoveryScan;
+
     private Map<String, Map<String, String>> verticesAndMetricsMap = new ConcurrentHashMap<>();
 
     static {
@@ -124,12 +128,13 @@ public class FlinkJobTask implements DaemonTask {
             return false;
         }
 
+        boolean canceledBeforeRefresh = JobStatus.CANCELED.getValue().equals(jobInfoDetail.getInstance().getStatus());
         boolean isDone = JobRefreshHandler.refreshJob(jobInfoDetail, isNeedSave());
-        if (shouldRetryMonitorScan(isDone)) {
+        if (shouldRetryMonitorScan(isDone, canceledBeforeRefresh)) {
             if (isMonitorScanActive() && tryDiscoverJobId()) {
                 return false;
             }
-            isDone = handleMonitorScanRetry();
+            isDone = handleMonitorScanRetry(canceledBeforeRefresh);
             if (!isDone) {
                 return false;
             }
@@ -173,18 +178,33 @@ public class FlinkJobTask implements DaemonTask {
     }
 
     /** 仅对 Kubernetes Application 的监控不可达状态做重扫，避免影响 Flink 已明确返回的真实终态。 */
-    private boolean shouldRetryMonitorScan(boolean isDone) {
+    private boolean shouldRetryMonitorScan(boolean isDone, boolean canceledBeforeRefresh) {
         if (!isKubernetesApplicationJob()) {
             return false;
         }
         String status = jobInfoDetail.getInstance().getStatus();
+        if ((canceledBeforeRefresh || JobStatus.CANCELED.getValue().equals(status))
+                && !isAutomaticRecoveryEnabled()) {
+            return false;
+        }
+        if (JobStatus.CANCELED.getValue().equals(status)) {
+            return isDone && isAutomaticRecoveryEnabled();
+        }
         return JobStatus.RECONNECTING.getValue().equals(status)
                 || (isDone && JobStatus.UNKNOWN.getValue().equals(status));
     }
 
+    /** 用户主动停止的实例不进入自动恢复；外部驱逐或 JobManager 重建留下的 CANCELED 才允许有限重扫。 */
+    private boolean isAutomaticRecoveryEnabled() {
+        TaskDTO task = taskService.getTaskInfoById(jobInfoDetail.getInstance().getTaskId());
+        return task != null && !TaskMonitorScanStatus.CANCELED.getValue().equals(task.getMonitorScanStatus());
+    }
+
     /** 监控失败先保留实例关联，按 30 秒基础间隔最多重扫 10 次，全部失败后才停止监控并标记任务扫描失败。 */
-    private boolean handleMonitorScanRetry() {
+    private boolean handleMonitorScanRetry(boolean canceledBeforeRefresh) {
         if (!isMonitorScanActive()) {
+            canceledRecoveryScan = canceledBeforeRefresh
+                    || JobStatus.CANCELED.getValue().equals(jobInfoDetail.getInstance().getStatus());
             markTaskMonitorScanStatus(TaskMonitorScanStatus.SCANNING);
             keepJobReconnecting();
             lastMonitorScanTime = System.currentTimeMillis();
@@ -197,11 +217,12 @@ public class FlinkJobTask implements DaemonTask {
 
         monitorScanRetryCount++;
         if (monitorScanRetryCount >= MONITOR_SCAN_MAX_RETRY) {
-            if (markJobUnknownAfterMonitorScanExhausted()) {
+            if (markJobAfterMonitorScanExhausted()) {
                 markTaskMonitorScanStatus(TaskMonitorScanStatus.FAILED);
                 log.warn(
-                        "Kubernetes application job monitor rescan failed after {} retries; marked job UNKNOWN, task {} job instance {}",
+                        "Kubernetes application job monitor rescan failed after {} retries; final status is {}, task {} job instance {}",
                         MONITOR_SCAN_MAX_RETRY,
+                        jobInfoDetail.getInstance().getStatus(),
                         jobInfoDetail.getInstance().getTaskId(),
                         jobInfoDetail.getInstance().getId());
             } else {
@@ -224,6 +245,25 @@ public class FlinkJobTask implements DaemonTask {
                 jobInfoDetail.getInstance().getTaskId(),
                 jobInfoDetail.getInstance().getId());
         return false;
+    }
+
+    /** 重扫耗尽后恢复原有 CANCELED 语义；只有无法确认真实终态的旧监控才收敛为 UNKNOWN。 */
+    private boolean markJobAfterMonitorScanExhausted() {
+        if (canceledRecoveryScan) {
+            LocalDateTime finishTime = LocalDateTime.now();
+            boolean updated = jobInstanceService.update(new LambdaUpdateWrapper<JobInstance>()
+                    .eq(JobInstance::getId, jobInfoDetail.getInstance().getId())
+                    .eq(JobInstance::getStatus, JobStatus.RECONNECTING.getValue())
+                    .set(JobInstance::getStatus, JobStatus.CANCELED.getValue())
+                    .set(JobInstance::getFinishTime, finishTime));
+            if (updated) {
+                jobInfoDetail.getInstance().setStatus(JobStatus.CANCELED.getValue());
+                jobInfoDetail.getInstance().setFinishTime(finishTime);
+            }
+            canceledRecoveryScan = false;
+            return updated;
+        }
+        return markJobUnknownAfterMonitorScanExhausted();
     }
 
     /**
@@ -263,6 +303,7 @@ public class FlinkJobTask implements DaemonTask {
                     jobInfoDetail.getInstance().getId(),
                     oldJobId,
                     jobInfoDetail.getInstance().getJid());
+            canceledRecoveryScan = false;
             resetMonitorScanRetry();
             return true;
         } catch (Exception e) {
@@ -277,6 +318,10 @@ public class FlinkJobTask implements DaemonTask {
     /** 重扫期间一旦重新查到 Flink 作业，就恢复任务关联状态并继续原有监控流程。 */
     private void handleMonitorScanRecovered() {
         if (!isMonitorScanActive()) {
+            return;
+        }
+        if (!isAutomaticRecoveryEnabled()) {
+            resetMonitorScanRetry();
             return;
         }
         markTaskMonitorScanStatus(TaskMonitorScanStatus.SUCCESS);
@@ -302,6 +347,7 @@ public class FlinkJobTask implements DaemonTask {
     }
 
     private void keepJobReconnecting() {
+        String expectedJobId = jobInfoDetail.getInstance().getJid();
         jobInfoDetail.getInstance().setStatus(JobStatus.RECONNECTING.getValue());
         jobInfoDetail.getInstance().setFinishTime(LocalDateTime.now());
         // 只持久化重连字段，避免后台持有的旧详情把人工发现后更新的新 JID 覆盖回去。
@@ -309,7 +355,7 @@ public class FlinkJobTask implements DaemonTask {
         reconnectingInstance.setId(jobInfoDetail.getInstance().getId());
         reconnectingInstance.setStatus(JobStatus.RECONNECTING.getValue());
         reconnectingInstance.setFinishTime(jobInfoDetail.getInstance().getFinishTime());
-        jobInstanceService.updateById(reconnectingInstance);
+        jobInstanceService.updateIfCurrentJobId(reconnectingInstance, expectedJobId);
     }
 
     private void markTaskMonitorScanStatus(TaskMonitorScanStatus status) {

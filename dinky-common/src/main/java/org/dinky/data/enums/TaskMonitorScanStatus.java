@@ -24,7 +24,9 @@ public enum TaskMonitorScanStatus {
     NONE("NONE"),
     SCANNING("SCANNING"),
     SUCCESS("SUCCESS"),
-    FAILED("FAILED");
+    FAILED("FAILED"),
+    /** 用户主动停止作业后禁止把同一实例再次纳入自动重扫。 */
+    CANCELED("CANCELED");
 
     private final String value;
 

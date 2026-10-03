@@ -122,7 +122,7 @@ public class JobRefreshHandler {
         // Cluster information is missing and cannot be monitored
         if (Asserts.isNull(jobInfoDetail.getClusterInstance())) {
             jobInstance.setStatus(JobStatus.UNKNOWN.getValue());
-            jobInstanceService.updateById(jobInstance);
+            jobInstanceService.updateIfCurrentJobId(jobInstance, jobInstance.getJid());
             return true;
         }
 
@@ -228,12 +228,14 @@ public class JobRefreshHandler {
                     // if status is RECONNECTING, ignore it
                     isDone = true;
                 } else {
-                    jobInstanceService.updateById(jobInstance);
-                    jobHistoryService.updateById(jobInfoDetail.getJobDataDto().toJobHistory());
+                    if (jobInstanceService.updateIfCurrentJobId(jobInstance, jobInstance.getJid())) {
+                        jobHistoryService.updateById(jobInfoDetail.getJobDataDto().toJobHistory());
+                    }
                 }
             } else {
-                jobInstanceService.updateById(jobInstance);
-                jobHistoryService.updateById(jobInfoDetail.getJobDataDto().toJobHistory());
+                if (jobInstanceService.updateIfCurrentJobId(jobInstance, jobInstance.getJid())) {
+                    jobHistoryService.updateById(jobInfoDetail.getJobDataDto().toJobHistory());
+                }
             }
         }
 

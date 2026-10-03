@@ -339,6 +339,28 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
     }
 
     /**
+     * 监控刷新使用旧 JID 作为乐观并发条件；主动发现替换 JID 后，迟到的旧结果必须被丢弃。
+     */
+    @Override
+    public boolean updateIfCurrentJobId(JobInstance jobInstance, String expectedJobId) {
+        if (jobInstance == null || jobInstance.getId() == null) {
+            return false;
+        }
+        LambdaUpdateWrapper<JobInstance> updateWrapper = new LambdaUpdateWrapper<JobInstance>()
+                .eq(JobInstance::getId, jobInstance.getId());
+        updateWrapper.and(wrapper -> {
+            if (StrUtil.isBlank(expectedJobId)) {
+                wrapper.isNull(JobInstance::getJid)
+                        .or()
+                        .eq(JobInstance::getJid, "");
+            } else {
+                wrapper.eq(JobInstance::getJid, expectedJobId);
+            }
+        });
+        return update(jobInstance, updateWrapper);
+    }
+
+    /**
      * 节点驱逐可能让同一个 Kubernetes Application 以新 JID 恢复；这里从 overview 中选择最新活跃作业，
      * 并以条件更新保证后台扫描和人工点击并发执行时不会互相覆盖已经恢复的关联。
      */

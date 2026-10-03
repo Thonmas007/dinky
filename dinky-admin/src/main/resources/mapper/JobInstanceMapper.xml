@@ -85,10 +85,15 @@
     </select>
 
     <select id="listJobInstanceActive" resultType="org.dinky.data.model.job.JobInstance">
-        select *
-        from dinky_job_instance
-        where status not in ('FAILED', 'CANCELED', 'FINISHED', 'UNKNOWN')
-        order by id desc
+        select ji.*
+        from dinky_job_instance ji
+        left join dinky_history h on h.id = ji.history_id
+        left join dinky_task t on t.id = ji.task_id
+        where ji.status not in ('FAILED', 'CANCELED', 'FINISHED', 'UNKNOWN')
+           or (ji.status = 'CANCELED'
+               and coalesce(t.monitor_scan_status, 'NONE') in ('NONE', 'SCANNING', 'SUCCESS')
+               and lower(coalesce(h.type, '')) in ('ka', 'kubernetes-application', 'kao', 'kubernetes-application-operator'))
+        order by ji.id desc
     </select>
 
     <select id="getJobInstanceByTaskId" resultType="org.dinky.data.model.job.JobInstance">

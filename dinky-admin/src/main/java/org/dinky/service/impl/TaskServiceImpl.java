@@ -488,6 +488,12 @@ public class TaskServiceImpl extends SuperServiceImpl<TaskMapper, Task> implemen
             log.warn("Stop with savePoint failed: {}, will try normal rest api stop", e.getMessage());
             isSuccess = jobManager.cancelNormal(jobInstance.getJid());
         }
+        // 用户主动停止与 Kubernetes 驱逐都可能表现为 CANCELED，写入意图标记避免主动停止后无限自动发现。
+        if (isSuccess) {
+            Task stoppedTask = new Task(task.getId(), jobInstance.getId());
+            stoppedTask.setMonitorScanStatus(TaskMonitorScanStatus.CANCELED.getValue());
+            updateById(stoppedTask);
+        }
         jobInstanceService.refreshJobInfoDetail(jobInstance.getId(), jobInstance.getTaskId(), true);
         return isSuccess;
     }
