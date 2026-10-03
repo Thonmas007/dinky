@@ -62,6 +62,7 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.Callable;
 
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
@@ -118,11 +119,14 @@ public class JobRefreshHandler {
         JobInstance jobInstance = jobInfoDetail.getInstance();
         JobDataDto jobDataDto = jobInfoDetail.getJobDataDto();
         String oldStatus = jobInstance.getStatus();
+        // 在网络请求前读取版本，主动发现即使没有替换 JID，也会使旧请求失去写入资格。
+        JobInstance refreshSnapshot = jobInstanceService.getById(jobInstance.getId());
+        LocalDateTime expectedUpdateTime = refreshSnapshot.getUpdateTime();
 
         // Cluster information is missing and cannot be monitored
         if (Asserts.isNull(jobInfoDetail.getClusterInstance())) {
             jobInstance.setStatus(JobStatus.UNKNOWN.getValue());
-            jobInstanceService.updateIfCurrentJobId(jobInstance, jobInstance.getJid());
+            jobInstanceService.updateIfCurrentJobId(jobInstance, jobInstance.getJid(), expectedUpdateTime);
             return true;
         }
 
@@ -228,13 +232,20 @@ public class JobRefreshHandler {
                     // if status is RECONNECTING, ignore it
                     isDone = true;
                 } else {
-                    if (jobInstanceService.updateIfCurrentJobId(jobInstance, jobInstance.getJid())) {
-                        jobHistoryService.updateById(jobInfoDetail.getJobDataDto().toJobHistory());
+                    if (jobInstanceService.updateIfCurrentJobId(jobInstance, jobInstance.getJid(), expectedUpdateTime)) {
+                        jobHistoryService.updateById(
+                                jobInfoDetail.getJobDataDto().toJobHistory());
+                    } else {
+                        jobInfoDetail.setInstance(jobInstanceService.getById(jobInstance.getId()));
+                        return false;
                     }
                 }
             } else {
-                if (jobInstanceService.updateIfCurrentJobId(jobInstance, jobInstance.getJid())) {
+                if (jobInstanceService.updateIfCurrentJobId(jobInstance, jobInstance.getJid(), expectedUpdateTime)) {
                     jobHistoryService.updateById(jobInfoDetail.getJobDataDto().toJobHistory());
+                } else {
+                    jobInfoDetail.setInstance(jobInstanceService.getById(jobInstance.getId()));
+                    return false;
                 }
             }
         }
@@ -276,53 +287,80 @@ public class JobRefreshHandler {
         }
         FlinkAPI api = FlinkAPI.build(jobManagerHost);
         try {
-            JsonNode jobInfo = FlinkAPI.build(jobManagerHost).getJobInfo(jobId);
+            JsonNode jobInfo = api.getJobInfo(jobId);
             if (jobInfo.has(FlinkRestResultConstant.ERRORS)) {
                 throw new Exception(String.valueOf(jobInfo.get(FlinkRestResultConstant.ERRORS)));
             }
 
-            FlinkJobConfigInfo jobConfigInfo =
-                    JSON.parseObject(api.getJobsConfig(jobId).toString()).toJavaObject(FlinkJobConfigInfo.class);
-
             FlinkJobDetailInfo flinkJobDetailInfo =
                     JSON.parseObject(jobInfo.toString()).toJavaObject(FlinkJobDetailInfo.class);
+            if (flinkJobDetailInfo == null || Asserts.isNullString(flinkJobDetailInfo.getState())) {
+                throw new IllegalStateException("Flink job detail does not contain a valid state");
+            }
+            // 作业详情是状态的依据；附加请求失败不能把正常运行的作业标记为重连。
+            builder.id(id).job(flinkJobDetailInfo).error(false);
+            builder.config(readOptionalJobData(jobId, "config", () -> JSON.parseObject(
+                            api.getJobsConfig(jobId).toString())
+                    .toJavaObject(FlinkJobConfigInfo.class)));
             // 获取 WATERMARK  & BACKPRESSURE 信息
-            api.getVertices(jobId).forEach(vertex -> {
-                flinkJobDetailInfo.getPlan().getNodes().forEach(planNode -> {
-                    if (planNode.getId().equals(vertex)) {
-                        try {
-                            CollectionType listType = objectMapper
-                                    .getTypeFactory()
-                                    .constructCollectionType(ArrayList.class, FlinkJobNodeWaterMark.class);
-                            List<FlinkJobNodeWaterMark> watermark =
-                                    objectMapper.readValue(api.getWatermark(jobId, vertex), listType);
-                            planNode.setWatermark(watermark);
-                        } catch (Exception ignored) {
+            readOptionalJobData(jobId, "vertices", () -> {
+                api.getVertices(jobId).forEach(vertex -> {
+                    flinkJobDetailInfo.getPlan().getNodes().forEach(planNode -> {
+                        if (planNode.getId().equals(vertex)) {
+                            try {
+                                CollectionType listType = objectMapper
+                                        .getTypeFactory()
+                                        .constructCollectionType(ArrayList.class, FlinkJobNodeWaterMark.class);
+                                List<FlinkJobNodeWaterMark> watermark =
+                                        objectMapper.readValue(api.getWatermark(jobId, vertex), listType);
+                                planNode.setWatermark(watermark);
+                            } catch (Exception ignored) {
+                            }
+                            planNode.setBackpressure(readOptionalJobData(
+                                    jobId,
+                                    "backpressure:" + vertex,
+                                    () -> JsonUtils.toJavaBean(
+                                            api.getBackPressure(jobId, vertex), FlinkJobNodeBackPressure.class)));
                         }
-                        planNode.setBackpressure(JsonUtils.toJavaBean(
-                                api.getBackPressure(jobId, vertex), FlinkJobNodeBackPressure.class));
-                    }
+                    });
                 });
+                return true;
             });
-            JsonNode checkPoints = api.getCheckPoints(jobId);
-            if (checkPoints.findParent("errors") == null) {
-                builder.checkpoints(JsonUtils.parseObject(checkPoints.toString(), CheckPointOverView.class));
-            }
-            JsonNode checkpointConfigInfo = api.getCheckPointsConfig(jobId);
-            if (checkpointConfigInfo.findParent("errors") == null) {
-                builder.checkpointsConfig(
-                        JsonUtils.parseObject(checkpointConfigInfo.toString(), CheckpointConfigInfo.class));
-            }
-            return builder.id(id)
-                    .exceptions(
-                            JsonUtils.parseObject(api.getException(jobId).toString(), FlinkJobExceptionsDetail.class))
-                    .job(flinkJobDetailInfo)
-                    .config(jobConfigInfo)
-                    .build();
+            builder.checkpoints(readOptionalJobData(jobId, "checkpoints", () -> {
+                JsonNode checkPoints = api.getCheckPoints(jobId);
+                if (checkPoints.findParent("errors") == null) {
+                    return JsonUtils.parseObject(checkPoints.toString(), CheckPointOverView.class);
+                }
+                return null;
+            }));
+            builder.checkpointsConfig(readOptionalJobData(jobId, "checkpointsConfig", () -> {
+                JsonNode checkpointConfigInfo = api.getCheckPointsConfig(jobId);
+                if (checkpointConfigInfo.findParent("errors") == null) {
+                    return JsonUtils.parseObject(checkpointConfigInfo.toString(), CheckpointConfigInfo.class);
+                }
+                return null;
+            }));
+            builder.exceptions(readOptionalJobData(
+                    jobId,
+                    "exceptions",
+                    () -> JsonUtils.parseObject(api.getException(jobId).toString(), FlinkJobExceptionsDetail.class)));
+            return builder.build();
         } catch (Exception e) {
-            String errorMsg = Asserts.isNotNullString(e.getMessage()) ? e.getMessage() : e.getClass().getSimpleName();
+            String errorMsg = Asserts.isNotNullString(e.getMessage())
+                    ? e.getMessage()
+                    : e.getClass().getSimpleName();
             log.warn("Connect {} failed,{}", jobManagerHost, errorMsg);
             return builder.id(id).error(true).errorMsg(errorMsg).build();
+        }
+    }
+
+    /** 附加监控数据允许暂时缺失，返回空值由刷新合并逻辑保留上一轮数据。 */
+    private static <T> T readOptionalJobData(String jobId, String section, Callable<T> reader) {
+        try {
+            return reader.call();
+        } catch (Exception e) {
+            log.warn("Refresh optional Flink data {} failed for job {}: {}", section, jobId, e.toString());
+            return null;
         }
     }
 

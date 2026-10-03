@@ -343,11 +343,20 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
      */
     @Override
     public boolean updateIfCurrentJobId(JobInstance jobInstance, String expectedJobId) {
+        return updateIfCurrentJobId(jobInstance, expectedJobId, null);
+    }
+
+    /** 同一作业也使用刷新版本约束写入，避免迟到请求覆盖主动恢复结果。 */
+    @Override
+    public boolean updateIfCurrentJobId(JobInstance jobInstance, String expectedJobId, LocalDateTime expectedUpdateTime) {
         if (jobInstance == null || jobInstance.getId() == null) {
             return false;
         }
         LambdaUpdateWrapper<JobInstance> updateWrapper = new LambdaUpdateWrapper<JobInstance>()
                 .eq(JobInstance::getId, jobInstance.getId());
+        if (expectedUpdateTime != null) {
+            updateWrapper.eq(JobInstance::getUpdateTime, expectedUpdateTime);
+        }
         updateWrapper.and(wrapper -> {
             if (StrUtil.isBlank(expectedJobId)) {
                 wrapper.isNull(JobInstance::getJid)
@@ -414,6 +423,7 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
                 .eq(JobInstance::getId, jobInstanceId)
                 .set(JobInstance::getJid, newJobId)
                 .set(JobInstance::getStatus, newStatus)
+                .set(JobInstance::getUpdateTime, LocalDateTime.now())
                 .set(JobInstance::getFinishTime, null)
                 .set(JobInstance::getError, null);
         // 并发发现只允许旧 JID 或同一个新 JID 写入，避免迟到的扫描覆盖另一轮已经建立的新关联。

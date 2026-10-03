@@ -355,7 +355,14 @@ public class FlinkJobTask implements DaemonTask {
         reconnectingInstance.setId(jobInfoDetail.getInstance().getId());
         reconnectingInstance.setStatus(JobStatus.RECONNECTING.getValue());
         reconnectingInstance.setFinishTime(jobInfoDetail.getInstance().getFinishTime());
-        jobInstanceService.updateIfCurrentJobId(reconnectingInstance, expectedJobId);
+        // 重扫等待期间也可能发生人工恢复，不能仅凭相同 JID 覆盖更新后的运行状态。
+        reconnectingInstance.setUpdateTime(LocalDateTime.now());
+        if (!jobInstanceService.updateIfCurrentJobId(
+                reconnectingInstance, expectedJobId, jobInfoDetail.getInstance().getUpdateTime())) {
+            jobInfoDetail.setInstance(jobInstanceService.getById(reconnectingInstance.getId()));
+        } else {
+            jobInfoDetail.getInstance().setUpdateTime(reconnectingInstance.getUpdateTime());
+        }
     }
 
     private void markTaskMonitorScanStatus(TaskMonitorScanStatus status) {

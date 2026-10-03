@@ -112,6 +112,9 @@ public interface JobInstanceService extends ISuperService<JobInstance> {
     /** 只在实例仍指向同一个 Flink Job ID 时更新监控结果，防止旧监控线程覆盖新关联。 */
     boolean updateIfCurrentJobId(JobInstance jobInstance, String expectedJobId);
 
+    /** 同一 JID 下校验刷新前的更新时间，丢弃恢复之后才返回的旧结果。 */
+    boolean updateIfCurrentJobId(JobInstance jobInstance, String expectedJobId, java.time.LocalDateTime expectedUpdateTime);
+
     /**
      * Hook the job done for the given job ID and task ID.
      *
