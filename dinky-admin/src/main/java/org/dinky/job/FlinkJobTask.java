@@ -21,6 +21,7 @@ package org.dinky.job;
 
 import org.dinky.assertion.Asserts;
 import org.dinky.context.SpringContextUtils;
+import org.dinky.context.TenantContextHolder;
 import org.dinky.daemon.constant.FlinkTaskConstant;
 import org.dinky.daemon.task.DaemonTask;
 import org.dinky.daemon.task.DaemonTaskConfig;
@@ -124,6 +125,8 @@ public class FlinkJobTask implements DaemonTask {
     @Override
     // 队列轮询可能由多个工作线程取到同一对象，刷新与重试计数必须串行维护。
     public synchronized boolean dealTask() {
+        // 定时器可能在系统初始化前创建线程；每轮先绑定实例租户，避免空租户或上一任务租户使归属查询误判并退出监控。
+        TenantContextHolder.set(jobInfoDetail.getInstance().getTenantId());
         // 同一任务重新提交后，旧实例不得继续重发现并抢回任务绑定，也不再产生终态告警。
         if (isKubernetesApplicationJob()) {
             JobInstance latestSubmission = jobInstanceService.getJobInstanceByTaskId(
@@ -132,6 +135,10 @@ public class FlinkJobTask implements DaemonTask {
                     || !Objects.equals(
                             latestSubmission.getId(),
                             jobInfoDetail.getInstance().getId())) {
+                return true;
+            }
+            // 人工停止优先于重扫等待，UNKNOWN 或 RECONNECTING 也不能继续自动恢复。
+            if (!isAutomaticRecoveryEnabled()) {
                 return true;
             }
         }

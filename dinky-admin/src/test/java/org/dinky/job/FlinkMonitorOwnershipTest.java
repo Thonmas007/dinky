@@ -30,6 +30,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import org.dinky.context.SpringContextUtils;
+import org.dinky.context.TenantContextHolder;
 import org.dinky.data.dto.TaskDTO;
 import org.dinky.data.model.ClusterInstance;
 import org.dinky.data.model.ext.JobInfoDetail;
@@ -41,6 +42,7 @@ import org.dinky.service.TaskService;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -81,6 +83,37 @@ class FlinkMonitorOwnershipTest {
     @BeforeEach
     void resetServices() {
         reset(instanceService, taskService);
+        TenantContextHolder.clear();
+    }
+
+    @AfterEach
+    void clearTenant() {
+        TenantContextHolder.clear();
+    }
+
+    // 模拟定时器提前创建无租户线程，查询必须先绑定实例租户，不能误判为历史监控。
+    @Test
+    void shouldBindTenantBeforeOwnershipQueryOnUninitializedWorker() {
+        assertTenantBeforeOwnershipQuery(null);
+    }
+
+    // 同一工作线程轮询不同租户时，不能继承上一任务的租户并查不到当前实例。
+    @Test
+    void shouldReplacePreviousTenantBeforeOwnershipQuery() {
+        assertTenantBeforeOwnershipQuery(2);
+    }
+
+    private void assertTenantBeforeOwnershipQuery(Integer previousTenant) {
+        FlinkJobTask monitor = monitor(51);
+        TenantContextHolder.set(previousTenant);
+        when(instanceService.getJobInstanceByTaskId(11))
+                .thenAnswer(invocation -> Integer.valueOf(1).equals(TenantContextHolder.get())
+                        ? monitor.getJobInfoDetail().getInstance()
+                        : null);
+        when(taskService.getTaskInfoById(11)).thenReturn(boundTask("SCANNING"));
+        when(instanceService.updateIfCurrentJobId(any(), any(), any())).thenReturn(true);
+        assertFalse(monitor.dealTask());
+        verify(instanceService).discoverJobId(51);
     }
 
     @Test
@@ -100,6 +133,21 @@ class FlinkMonitorOwnershipTest {
                 .thenReturn(monitor.getJobInfoDetail().getInstance());
         when(taskService.getTaskInfoById(11)).thenReturn(boundTask("CANCELED"));
         assertTrue(monitor.dealTask());
+        verify(instanceService, never()).discoverJobId(51);
+    }
+
+    // 停止发生在重扫等待期间时，UNKNOWN/RECONNECTING 不能再等满下一轮才退出。
+    @Test
+    void shouldStopWaitingRecoveryImmediatelyAfterManualStop() {
+        for (String status : new String[] {"UNKNOWN", "RECONNECTING"}) {
+            FlinkJobTask monitor = monitor(51);
+            monitor.getJobInfoDetail().getInstance().setStatus(status);
+            monitor.setLastMonitorScanTime(System.currentTimeMillis());
+            when(instanceService.getJobInstanceByTaskId(11))
+                    .thenReturn(monitor.getJobInfoDetail().getInstance());
+            when(taskService.getTaskInfoById(11)).thenReturn(boundTask("CANCELED"));
+            assertTrue(monitor.dealTask());
+        }
         verify(instanceService, never()).discoverJobId(51);
     }
 
@@ -137,6 +185,7 @@ class FlinkMonitorOwnershipTest {
         JobInstance instance = new JobInstance();
         instance.setId(id);
         instance.setTaskId(11);
+        instance.setTenantId(1);
         instance.setJid("same-job");
         instance.setStatus("CANCELED");
         ClusterInstance cluster = new ClusterInstance();

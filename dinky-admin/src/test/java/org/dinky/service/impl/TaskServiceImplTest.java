@@ -52,6 +52,46 @@ import com.alibaba.druid.pool.DruidDataSource;
 
 class TaskServiceImplTest {
 
+    /** 集群已被删除时强制停止只能确认退出监控，不能伪造 Flink 取消成功或继续重扫。 */
+    @Test
+    void shouldRecordManualStopWhenClusterIsMissing() {
+        JobInstanceService instances = mock(JobInstanceService.class);
+        TaskServiceImpl service = spy(new TaskServiceImpl(
+                mock(SavepointsService.class),
+                mock(ClusterInstanceService.class),
+                mock(ClusterConfigurationService.class),
+                mock(DataBaseService.class),
+                instances,
+                mock(AlertGroupService.class),
+                mock(TaskVersionService.class),
+                mock(FragmentVariableService.class),
+                mock(UDFTemplateService.class),
+                mock(DataSourceProperties.class),
+                mock(UserService.class),
+                mock(ApplicationContext.class),
+                mock(DruidDataSource.class)));
+        TaskDTO task = new TaskDTO();
+        task.setId(2);
+        task.setDialect("FlinkJar");
+        task.setJobInstanceId(20);
+        JobInstance instance = new JobInstance();
+        instance.setId(20);
+        instance.setTaskId(2);
+        instance.setClusterId(3);
+        when(instances.getById(20)).thenReturn(instance);
+        doReturn(true)
+                .when(service)
+                .update(any(Task.class), any(com.baomidou.mybatisplus.core.conditions.Wrapper.class));
+        assertTrue(service.cancelTaskJob(task, false, true));
+        org.junit.jupiter.api.Assertions.assertEquals("UNKNOWN", instance.getStatus());
+        verify(service)
+                .update(
+                        org.mockito.ArgumentMatchers.argThat(
+                                (Task stopped) -> "CANCELED".equals(stopped.getMonitorScanStatus())),
+                        any(com.baomidou.mybatisplus.core.conditions.Wrapper.class));
+        verify(instances, never()).refreshJobInfoDetail(any(), any(), anyBoolean());
+    }
+
     /** 发布生命周期切换不能触发作业探测，否则历史实例会被重新加入运行监控队列。 */
     @Test
     void shouldNotRefreshJobStatusWhenChangingTaskLifeCycle() throws Exception {

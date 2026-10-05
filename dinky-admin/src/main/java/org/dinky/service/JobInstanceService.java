@@ -29,6 +29,7 @@ import org.dinky.mybatis.service.ISuperService;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Set;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
@@ -113,7 +114,8 @@ public interface JobInstanceService extends ISuperService<JobInstance> {
     boolean updateIfCurrentJobId(JobInstance jobInstance, String expectedJobId);
 
     /** 同一 JID 下校验刷新前的更新时间，丢弃恢复之后才返回的旧结果。 */
-    boolean updateIfCurrentJobId(JobInstance jobInstance, String expectedJobId, java.time.LocalDateTime expectedUpdateTime);
+    boolean updateIfCurrentJobId(
+            JobInstance jobInstance, String expectedJobId, java.time.LocalDateTime expectedUpdateTime);
 
     /**
      * Hook the job done for the given job ID and task ID.
@@ -148,6 +150,9 @@ public interface JobInstanceService extends ISuperService<JobInstance> {
      * @return A {@link JobInstance} object representing the found job instance.
      */
     JobInstance getJobInstanceByTaskId(Integer id);
+
+    /** 开发页状态与运维最新实例一致，重连和终态不展示运行标记。 */
+    Set<Integer> getRunningTaskIds();
 
     /**
      * List all job instances in the system.

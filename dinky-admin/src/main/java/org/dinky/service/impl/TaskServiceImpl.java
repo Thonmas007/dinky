@@ -132,6 +132,7 @@ import org.springframework.web.multipart.MultipartFile;
 import com.alibaba.druid.pool.DruidDataSource;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -460,16 +461,18 @@ public class TaskServiceImpl extends SuperServiceImpl<TaskMapper, Task> implemen
         JobInstance jobInstance = jobInstanceService.getById(task.getJobInstanceId());
         DinkyAssert.checkNull(jobInstance, Status.JOB_INSTANCE_NOT_EXIST.getMessage());
         ClusterInstance clusterInstance = clusterInstanceService.getById(jobInstance.getClusterId());
-        DinkyAssert.checkNull(clusterInstance, Status.CLUSTER_NOT_EXIST.getMessage());
 
         JobManager jobManager;
         try {
+            DinkyAssert.checkNull(clusterInstance, Status.CLUSTER_NOT_EXIST.getMessage());
             jobManager = JobManager.build(buildJobConfig(task));
         } catch (Exception e) {
             log.error("cancelTaskJob error:{}", e.getMessage());
             if (forceCancel) {
                 jobInstance.setStatus(JobStatus.UNKNOWN.getValue());
                 jobInstanceService.updateById(jobInstance);
+                // 强制退出监控不等于 Flink 已取消；保留 UNKNOWN，但记录人工停止意图以禁止重扫。
+                markTaskManuallyStopped(task.getId(), jobInstance.getId());
                 return true;
             } else {
                 throw e;
@@ -490,12 +493,19 @@ public class TaskServiceImpl extends SuperServiceImpl<TaskMapper, Task> implemen
         }
         // 用户主动停止与 Kubernetes 驱逐都可能表现为 CANCELED，写入意图标记避免主动停止后无限自动发现。
         if (isSuccess) {
-            Task stoppedTask = new Task(task.getId(), jobInstance.getId());
-            stoppedTask.setMonitorScanStatus(TaskMonitorScanStatus.CANCELED.getValue());
-            updateById(stoppedTask);
+            markTaskManuallyStopped(task.getId(), jobInstance.getId());
         }
         jobInstanceService.refreshJobInfoDetail(jobInstance.getId(), jobInstance.getTaskId(), true);
         return isSuccess;
+    }
+
+    /** 停止请求不能覆盖并发新提交的绑定或停止标记，仅标记请求所属实例。 */
+    private void markTaskManuallyStopped(Integer taskId, Integer instanceId) {
+        Task stoppedTask = new Task();
+        stoppedTask.setMonitorScanStatus(TaskMonitorScanStatus.CANCELED.getValue());
+        update(
+                stoppedTask,
+                new LambdaUpdateWrapper<Task>().eq(Task::getId, taskId).eq(Task::getJobInstanceId, instanceId));
     }
 
     /** 提交结果登记失败时按任务配置直接检查 K8s，绕过不存在或不完整的 JobInstance。 */

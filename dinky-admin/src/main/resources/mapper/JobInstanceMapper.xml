@@ -103,6 +103,16 @@
         order by id desc limit 1
     </select>
 
+    <select id="listRunningTaskIds" resultType="java.lang.Integer">
+        select ji.task_id
+        from dinky_job_instance ji
+        inner join (select max(id) as id from dinky_job_instance group by tenant_id, task_id) latest
+            on latest.id = ji.id
+        inner join dinky_task t on t.id = ji.task_id and t.tenant_id = ji.tenant_id
+        where ji.status = 'RUNNING'
+          and coalesce(t.monitor_scan_status, 'NONE') != 'CANCELED'
+    </select>
+
     <select id="getTenantByJobInstanceId" resultType="java.lang.Integer">
         select tenant_id
         from dinky_job_instance

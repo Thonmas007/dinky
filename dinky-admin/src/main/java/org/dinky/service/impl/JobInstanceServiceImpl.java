@@ -807,6 +807,12 @@ public class JobInstanceServiceImpl extends SuperServiceImpl<JobInstanceMapper, 
         return baseMapper.getJobInstanceByTaskId(id);
     }
 
+    /** HTTP 补偿和 WebSocket 复用同一状态来源，避免队列保留重扫任务时误亮火苗。 */
+    @Override
+    public Set<Integer> getRunningTaskIds() {
+        return new java.util.HashSet<>(baseMapper.listRunningTaskIds());
+    }
+
     @Override
     public ProTableResult<JobInstanceVo> listJobInstances(JsonNode para) {
         int current = para.has("current") ? para.get("current").asInt() : 1;

@@ -21,7 +21,6 @@ package org.dinky.controller;
 
 import org.dinky.api.FlinkAPI;
 import org.dinky.assertion.Asserts;
-import org.dinky.daemon.pool.FlinkJobThreadPool;
 import org.dinky.data.annotations.Log;
 import org.dinky.data.enums.BusinessType;
 import org.dinky.data.enums.JobStatus;
@@ -122,15 +121,14 @@ public class JobInstanceController {
     }
 
     /**
-     * 获取当前监控线程池中的运行中任务 ID，保持与 TASK_RUN_INSTANCE WebSocket 的 RunningTaskId 字段一致。
+     * 获取最新实例确实运行的任务 ID，与 WebSocket 共用状态来源。
      *
      * @return {@link Result}< {@link Map}< {@link String}, {@link Set}< {@link Integer}>>>
      */
     @GetMapping("/getRunningTaskIds")
     @ApiOperation("Get running task ids")
     public Result<Map<String, Set<Integer>>> getRunningTaskIds() {
-        Set<Integer> runningTaskIds =
-                new HashSet<>(FlinkJobThreadPool.getInstance().getCurrentMonitorTaskIds());
+        Set<Integer> runningTaskIds = jobInstanceService.getRunningTaskIds();
         return Result.succeed(Collections.singletonMap("RunningTaskId", runningTaskIds));
     }
 

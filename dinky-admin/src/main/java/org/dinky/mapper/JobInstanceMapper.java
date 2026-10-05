@@ -51,6 +51,10 @@ public interface JobInstanceMapper extends SuperMapper<JobInstance> {
 
     JobInstance getJobInstanceByTaskId(Integer id);
 
+    /** 全局状态广播只取各任务最新提交的运行实例，不能把监控重试队列当成运行状态。 */
+    @InterceptorIgnore(tenantLine = "true")
+    List<Integer> listRunningTaskIds();
+
     @InterceptorIgnore(tenantLine = "true")
     Integer getTenantByJobInstanceId(@Param("id") Integer id);
 }

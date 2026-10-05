@@ -19,7 +19,7 @@
 
 package org.dinky.ws.handler;
 
-import org.dinky.daemon.pool.FlinkJobThreadPool;
+import org.dinky.service.JobInstanceService;
 import org.dinky.ws.GlobalWebSocketTopic;
 
 import java.util.HashMap;
@@ -30,18 +30,22 @@ import java.util.concurrent.TimeUnit;
 
 import org.springframework.stereotype.Service;
 
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 @Service
+@RequiredArgsConstructor
 public class TaskRunInstance extends ScheduleMessageEventHandler {
+
+    private final JobInstanceService jobInstanceService;
 
     private Set<Integer> runningJobIds = new ConcurrentSkipListSet<>();
 
     @Override
     public Map<String, Object> firstSubscribe(Set<String> allParams) {
         Map<String, Object> result = new HashMap<>();
-        result.put("RunningTaskId", FlinkJobThreadPool.getInstance().getCurrentMonitorTaskIds());
+        result.put("RunningTaskId", jobInstanceService.getRunningTaskIds());
         return result;
     }
 
@@ -52,12 +56,12 @@ public class TaskRunInstance extends ScheduleMessageEventHandler {
 
     @Override
     public Map<String, Object> autoMessageSend() {
-        Set<Integer> currentMonitorTaskIds = FlinkJobThreadPool.getInstance().getCurrentMonitorTaskIds();
-        if (!runningJobIds.equals(currentMonitorTaskIds)) {
+        Set<Integer> currentRunningTaskIds = jobInstanceService.getRunningTaskIds();
+        if (!runningJobIds.equals(currentRunningTaskIds)) {
             runningJobIds.clear();
-            runningJobIds.addAll(currentMonitorTaskIds);
+            runningJobIds.addAll(currentRunningTaskIds);
             Map<String, Object> result = new HashMap<>();
-            result.put("RunningTaskId", currentMonitorTaskIds);
+            result.put("RunningTaskId", currentRunningTaskIds);
             return result;
         }
         return new HashMap<>();
