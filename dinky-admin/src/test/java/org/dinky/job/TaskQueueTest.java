@@ -30,6 +30,20 @@ import org.junit.jupiter.api.Test;
 
 class TaskQueueTest {
 
+    // 运行状态采集持有快照时，新增、移除监控及外部修改快照均不能干扰队列。
+    @Test
+    void shouldReturnIndependentSnapshotForMonitoring() {
+        TaskQueue<DaemonTask> queue = new TaskQueue<>();
+        EqualTask task = new EqualTask(DaemonTaskConfig.build("test", 55, 12));
+        queue.addTask(task);
+        java.util.ArrayList<DaemonTask> snapshot = queue.getTasks();
+        queue.removeByTask(task);
+        assertEquals(1, snapshot.size());
+        queue.addTask(task);
+        snapshot.clear();
+        assertEquals(1, queue.getTaskSize());
+    }
+
     // 强制刷新替换监控后，旧工作线程的完成回调不能删除新对象。
     @Test
     void shouldKeepReplacementWhenOldEqualTaskCompletes() {

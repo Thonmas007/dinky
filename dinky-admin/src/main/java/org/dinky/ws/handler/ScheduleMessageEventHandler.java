@@ -31,6 +31,9 @@ import javax.annotation.Resource;
 
 import org.springframework.context.ApplicationEventPublisher;
 
+import lombok.extern.slf4j.Slf4j;
+
+@Slf4j
 public abstract class ScheduleMessageEventHandler implements WsMessageEventHandler {
     @Resource
     private ApplicationEventPublisher applicationEventPublisher;
@@ -45,22 +48,29 @@ public abstract class ScheduleMessageEventHandler implements WsMessageEventHandl
     public void run() {
         Timer timer = new Timer();
         long delay = scheduleDelay();
-        GlobalWebSocketTopic topic = getTopic();
         timer.schedule(
                 new TimerTask() {
                     @Override
                     public void run() {
-                        Map<String, ?> data = autoMessageSend();
-                        if (Asserts.isNotNullMap(data)) {
-                            WsSendEvent event = WsSendEvent.builder()
-                                    .topic(topic)
-                                    .paramsAndData(data)
-                                    .build();
-                            applicationEventPublisher.publishEvent(event);
-                        }
+                        publishNextMessage();
                     }
                 },
                 0,
                 delay);
+    }
+
+    // Timer 遇到未捕获异常会永久退出，单次采集或发布失败不能停止后续运行状态推送。
+    protected void publishNextMessage() {
+        GlobalWebSocketTopic topic = getTopic();
+        try {
+            Map<String, ?> data = autoMessageSend();
+            if (Asserts.isNotNullMap(data)) {
+                WsSendEvent event =
+                        WsSendEvent.builder().topic(topic).paramsAndData(data).build();
+                applicationEventPublisher.publishEvent(event);
+            }
+        } catch (Exception e) {
+            log.warn("WebSocket topic {} collection failed; retry next cycle", topic, e);
+        }
     }
 }

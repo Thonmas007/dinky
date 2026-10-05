@@ -97,6 +97,9 @@ public class TaskQueue<T extends DaemonTask> {
     }
 
     public ArrayList<T> getTasks() {
-        return tasks;
+        // 状态推送只能遍历一致性快照，监控增删不能使外部遍历抛并发修改异常。
+        synchronized (lock) {
+            return new ArrayList<>(tasks);
+        }
     }
 }
